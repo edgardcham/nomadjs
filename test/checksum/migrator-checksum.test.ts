@@ -301,7 +301,7 @@ describe("Migrator with Checksum Support", () => {
       await migrator.verifyChecksum(currentMigration);
 
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("WARNING: Checksum mismatch")
+        expect.stringContaining("Checksum mismatch for migration")
       );
     });
   });

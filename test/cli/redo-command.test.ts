@@ -7,12 +7,22 @@ import { execSync } from "child_process";
 import { mkdirSync, rmSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
 import { Pool } from "pg";
+import { isDatabaseAvailable } from "../utils/db";
 
-describe("CLI: nomad redo command", () => {
-  const testDbUrl = process.env.DATABASE_URL || "postgresql://localhost/test";
+const testDbUrl = process.env.DATABASE_URL || "postgresql://localhost/test";
+const nomadCmd = "node dist/esm/cli.js";
+const shouldRunDbTests = process.env.NOMAD_TEST_WITH_DB === "true" &&
+  isDatabaseAvailable(testDbUrl, nomadCmd);
+
+if (!shouldRunDbTests) {
+  console.warn("Skipping CLI redo command tests: database unavailable or NOMAD_TEST_WITH_DB not set");
+}
+
+const describeIfDb = shouldRunDbTests ? describe : describe.skip;
+
+describeIfDb("CLI: nomad redo command", () => {
   const testTable = `nomad_test_redo_${Date.now()}`;
   const testDir = join(process.cwd(), `test-migrations-redo`);
-  const nomadCmd = "node dist/esm/cli.js";
   const pool = new Pool({ connectionString: testDbUrl });
 
   beforeAll(async () => {

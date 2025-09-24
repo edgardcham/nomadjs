@@ -3,6 +3,7 @@ import { execSync, spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { Pool } from "pg";
+import { isDatabaseAvailable } from "../utils/db";
 
 /**
  * Comprehensive Integration Tests for CLI Exit Codes
@@ -17,10 +18,19 @@ import { Pool } from "pg";
  * - Database state is reset between test suites
  */
 
-describe("CLI Exit Codes Integration", () => {
+const nomadCmd = "node dist/esm/cli.js";
+const testDbUrl = process.env.DATABASE_URL || "postgresql://postgres@localhost/nomaddb";
+const shouldRunDbTests = process.env.NOMAD_TEST_WITH_DB === "true" &&
+  isDatabaseAvailable(testDbUrl, nomadCmd);
+
+if (!shouldRunDbTests) {
+  console.warn("Skipping CLI exit code integration tests: database unavailable or NOMAD_TEST_WITH_DB not set");
+}
+
+const describeIfDb = shouldRunDbTests ? describe : describe.skip;
+
+describeIfDb("CLI Exit Codes Integration", () => {
   const testDir = join(process.cwd(), "test-migrations-exit-codes");
-  const nomadCmd = "node dist/esm/cli.js";
-  const testDbUrl = process.env.DATABASE_URL || "postgresql://postgres@localhost/nomaddb";
 
   // Use unique table names per test suite to avoid conflicts
   const getTestTable = (suiteName: string) => `nomad_test_${suiteName}_${Date.now()}`;

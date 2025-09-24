@@ -2,10 +2,20 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execSync } from "child_process";
 import { mkdirSync, rmSync, existsSync, writeFileSync } from "fs";
 import { join } from "path";
+import { isDatabaseAvailable } from "../utils/db";
 
 const nomadCmd = "node dist/esm/cli.js";
 const testDir = join(process.cwd(), "test-migrations-to");
 const testDbUrl = process.env.DATABASE_URL || "postgresql://postgres@localhost/nomaddb";
+
+const shouldRunDbTests = process.env.NOMAD_TEST_WITH_DB === "true" &&
+  isDatabaseAvailable(testDbUrl, nomadCmd);
+
+if (!shouldRunDbTests) {
+  console.warn("Skipping CLI to command tests: database unavailable or NOMAD_TEST_WITH_DB not set");
+}
+
+const describeIfDb = shouldRunDbTests ? describe : describe.skip;
 
 function run(cmd: string) {
   try {
@@ -16,7 +26,7 @@ function run(cmd: string) {
   }
 }
 
-describe("CLI: nomad to command", () => {
+describeIfDb("CLI: nomad to command", () => {
   beforeEach(() => {
     mkdirSync(testDir, { recursive: true });
   });
@@ -28,11 +38,7 @@ describe("CLI: nomad to command", () => {
   });
 
   it("applies migrations up to target version", () => {
-    const health = run(`${nomadCmd} status --url "${testDbUrl}" --dir ${testDir}`);
-    if (health.exitCode === 7) {
-      console.warn('Skipping CLI to test: database unavailable');
-      return;
-    }
+    const tableName = `nomad_cli_to_${Date.now()}`;
     const migration1 = join(testDir, "20240101120000_create_users.sql");
     const migration2 = join(testDir, "20240102120000_add_user.sql");
     writeFileSync(migration1, `-- +nomad Up
@@ -46,7 +52,7 @@ INSERT INTO users VALUES (1);
 DELETE FROM users WHERE id = 1;
 `);
 
-    const result = run(`${nomadCmd} to 20240102120000 --url "${testDbUrl}" --dir ${testDir}`);
+    const result = run(`${nomadCmd} to 20240102120000 --url "${testDbUrl}" --dir ${testDir} --table ${tableName}`);
     expect(result.exitCode).toBe(0);
   });
 });
