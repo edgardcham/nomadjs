@@ -293,6 +293,14 @@ Comprehensive test coverage with 300+ tests across all features:
 npm test
 ```
 
+To include the CLI end-to-end suites, point `DATABASE_URL` at a disposable database and opt in via `NOMAD_TEST_WITH_DB=true`:
+
+```bash
+DATABASE_URL="postgres://postgres@localhost/nomaddb" \\
+NOMAD_TEST_WITH_DB=true \\
+npm run test -- test/cli/exit-codes-integration.test.ts
+```
+
 **Test Coverage:**
 - **Parser**: 65 tests
   - Enhanced SQL parser: 19 tests
@@ -314,9 +322,9 @@ npm test
   - Advisory lock management
 - **Configuration**: Full coverage of env var substitution
 - **Migrator**: Core transaction handling, rollbacks, checksum verification
-- **CLI Integration**: Command-line interface and exit codes
+- **CLI Integration**: Command-line interface and exit codes (opt-in with `NOMAD_TEST_WITH_DB=true`)
 
-Tests use mocked databases and don't require a live PostgreSQL instance.
+Unit and core integration tests run entirely in-memory; the CLI suites require a reachable PostgreSQL instance and are skipped unless you opt in.
 
 ## Publishing Notes
 
