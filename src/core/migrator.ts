@@ -9,6 +9,7 @@ import { DriftError, MissingFileError, SqlError, ConnectionError, ChecksumMismat
 import { Planner, type PlanOptions, type MigrationPlan } from "./planner.js";
 import type { Config } from "../config.js";
 import type { Pool } from "pg";
+import { logger } from "../utils/logger.js";
 
 export interface MigrationFile {
   version: bigint;
@@ -187,8 +188,8 @@ export class Migrator {
       const appliedMig = applied.find(m => m.version === migration.version);
 
       if (appliedMig && appliedMig.checksum !== migration.checksum) {
-        console.warn(
-          `WARNING: Checksum mismatch for migration ${migration.version} (${migration.name})\n` +
+        logger.warn(
+          `Checksum mismatch for migration ${migration.version} (${migration.name})\n` +
           `  Expected: ${appliedMig.checksum}\n` +
           `  Actual: ${migration.checksum}\n` +
           `  Continuing due to --allow-drift flag`
@@ -463,14 +464,11 @@ export class Migrator {
 
     try {
       const lockTimeout = this.config.lockTimeout || 30000;
-      console.log("Acquiring migration lock...");
-
       cleanup = await lock.acquireWithCleanup(client, {
         timeout: lockTimeout,
         retryDelay: 100,
         maxRetryDelay: 5000
       });
-      console.log("Migration lock acquired");
 
       await this.ensureTable();
 
@@ -487,7 +485,7 @@ export class Migrator {
       }
 
       if (targetVersion === currentMax) {
-        console.log("Already at target version");
+        logger.info("Already at target version");
         return;
       }
 
@@ -515,18 +513,16 @@ export class Migrator {
       const plan = planner.planTo(files, appliedVersions, targetVersion, {});
 
       if (plan.migrations.length === 0) {
-        console.log("Already at target version");
+        logger.info("Already at target version");
       } else if (plan.direction === "up") {
-        console.log(`Applying ${plan.migrations.length} migration(s) to reach ${targetVersion}`);
+        logger.action(`Applying ${plan.migrations.length} migration(s) to reach ${targetVersion}`);
         for (const pm of plan.migrations) {
           const mf = fileMap.get(pm.version.toString());
           if (!mf) continue; // Shouldn't happen
-          console.log(`Applying migration ${mf.version} (${mf.name})`);
           await this.applyUpWithClient(mf, client);
-          console.log(`Successfully applied ${mf.version}`);
         }
       } else {
-        console.log(`Rolling back ${plan.migrations.length} migration(s) to reach ${targetVersion}`);
+        logger.action(`Rolling back ${plan.migrations.length} migration(s) to reach ${targetVersion}`);
         for (const pm of plan.migrations) {
           const mf = fileMap.get(pm.version.toString());
           if (!mf) continue; // Pre-check above should catch missing files
@@ -540,16 +536,16 @@ export class Migrator {
       for (const a of refreshedApplied.filter(a => !a.rolledBackAt)) {
         if (a.version > finalMax) finalMax = a.version;
       }
-      console.log(`Target reached. Current version: ${finalMax}`);
+      logger.success(`Target reached. Current version: ${finalMax}`);
     } catch (error) {
       if (error instanceof LockTimeoutError) {
-        console.error("Failed to acquire migration lock - another migration may be in progress");
+        logger.error("Failed to acquire migration lock - another migration may be in progress");
       }
       throw error;
     } finally {
       if (cleanup) {
         await cleanup();
-        console.log("Migration lock released");
+        cleanup = undefined;
       }
       client.release();
     }
@@ -573,15 +569,11 @@ export class Migrator {
     try {
       // Try to acquire lock with timeout
       const lockTimeout = this.config.lockTimeout || 30000;
-      console.log("Acquiring migration lock...");
-
       cleanup = await lock.acquireWithCleanup(client, {
         timeout: lockTimeout,
         retryDelay: 100,
         maxRetryDelay: 5000
       });
-
-      console.log("Migration lock acquired");
 
       // Now proceed with migrations
       await this.ensureTable();
@@ -597,23 +589,21 @@ export class Migrator {
       const pending = files.filter(f => !appliedVersions.has(f.version.toString()));
       const toApply = typeof limit === "number" ? pending.slice(0, Math.max(limit, 0)) : pending;
 
-      console.log(`Found ${files.length} migration files, ${pending.length} pending, applying ${toApply.length}`);
+      logger.action(`Applying ${toApply.length} migration(s) (${pending.length} pending out of ${files.length})`);
 
       for (const migration of toApply) {
-        console.log(`Applying migration ${migration.version} (${migration.name})`);
         await this.applyUpWithClient(migration, client);
-        console.log(`Successfully applied ${migration.version}`);
       }
     } catch (error) {
       if (error instanceof LockTimeoutError) {
-        console.error("Failed to acquire migration lock - another migration may be in progress");
+        logger.error("Failed to acquire migration lock - another migration may be in progress");
       }
       throw error;
     } finally {
       // Release lock and cleanup
       if (cleanup) {
         await cleanup();
-        console.log("Migration lock released");
+        cleanup = undefined;
       }
       client.release();
     }
@@ -637,15 +627,11 @@ export class Migrator {
     try {
       // Try to acquire lock with timeout
       const lockTimeout = this.config.lockTimeout || 30000;
-      console.log("Acquiring migration lock...");
-
       cleanup = await lock.acquireWithCleanup(client, {
         timeout: lockTimeout,
         retryDelay: 100,
         maxRetryDelay: 5000
       });
-
-      console.log("Migration lock acquired");
 
       // Now proceed with rollback
       await this.ensureTable();
@@ -666,7 +652,7 @@ export class Migrator {
       for (const appliedMig of activeApplied) {
         const file = fileMap.get(appliedMig.version);
         if (!file) {
-          throw new Error(`Migration file missing for version ${appliedMig.version}`);
+          throw new MissingFileError([`${appliedMig.version}_${appliedMig.name}`]);
         }
 
         // Verify checksum before rollback
@@ -684,14 +670,14 @@ export class Migrator {
       }
     } catch (error) {
       if (error instanceof LockTimeoutError) {
-        console.error("Failed to acquire migration lock - another migration may be in progress");
+        logger.error("Failed to acquire migration lock - another migration may be in progress");
       }
       throw error;
     } finally {
       // Release lock and cleanup
       if (cleanup) {
         await cleanup();
-        console.log("Migration lock released");
+        cleanup = undefined;
       }
       client.release();
     }
@@ -733,7 +719,7 @@ export class Migrator {
         filepath: file.filepath
       });
     } else if (file.checksum !== targetMigration.checksum) {
-      console.log(`Warning: Checksum mismatch for migration ${targetMigration.version} (${targetMigration.name})`);
+      logger.warn(`Checksum mismatch for migration ${targetMigration.version} (${targetMigration.name})`);
     }
 
     // Acquire advisory lock
@@ -749,34 +735,33 @@ export class Migrator {
 
     try {
       // Acquire lock with timeout
-      console.log("Acquiring migration lock...");
-
       cleanup = await lock.acquireWithCleanup(client, {
         timeout: this.config.lockTimeout || 30000,
         retryDelay: 100,
         maxRetryDelay: 5000
       });
 
-      console.log(`Rolling back ${targetMigration.version} (${targetMigration.name})`);
+      logger.action(`Rolling back ${targetMigration.version} (${targetMigration.name})`);
 
       // Execute down migration
       await this.executeDown(file, client);
 
-      console.log(`Reapplying ${targetMigration.version} (${targetMigration.name})`);
+      logger.action(`Reapplying ${targetMigration.version} (${targetMigration.name})`);
 
       // Execute up migration
       await this.executeUp(file, client);
 
-      console.log(`Redo complete: ${targetMigration.version} (${targetMigration.name})`);
+      logger.success(`Redo complete: ${targetMigration.version} (${targetMigration.name})`);
     } catch (error) {
       if (error instanceof LockTimeoutError) {
-        console.error("Failed to acquire migration lock - another migration may be in progress");
+        logger.error("Failed to acquire migration lock - another migration may be in progress");
       }
       throw error;
     } finally {
       // Release lock and cleanup
       if (cleanup) {
         await cleanup();
+        cleanup = undefined;
       }
       client.release();
     }
@@ -914,7 +899,7 @@ export class Migrator {
     // Validate hazards and determine if we should skip transactions
     const validation = validateHazards(hazards, migration.parsed.up.notx || migration.parsed.noTransaction, {
       autoNotx: this.config.autoNotx,
-      logger: (msg) => console.log(`⚠️  ${msg}`)
+      logger: (msg) => logger.warn(`⚠️  ${msg}`)
     });
 
     const shouldTx = !validation.shouldSkipTransaction;
@@ -939,7 +924,7 @@ export class Migrator {
       if (shouldTx) {
         await client.query("COMMIT");
       }
-      console.log(`↑ up ${label}`);
+      logger.success(`↑ up ${label}`);
     } catch (error) {
       if (shouldTx) await client.query("ROLLBACK");
       throw new SqlError(`Failed UP ${label}: ${(error as Error).message}`);
@@ -972,7 +957,7 @@ export class Migrator {
     // Validate hazards and determine if we should skip transactions
     const validation = validateHazards(hazards, migration.parsed.down.notx || migration.parsed.noTransaction, {
       autoNotx: this.config.autoNotx,
-      logger: (msg) => console.log(`⚠️  ${msg}`)
+      logger: (msg) => logger.warn(`⚠️  ${msg}`)
     });
 
     const shouldTx = !validation.shouldSkipTransaction;
@@ -992,7 +977,7 @@ export class Migrator {
       );
 
       if (shouldTx) await client.query("COMMIT");
-      console.log(`↓ down ${label}`);
+      logger.info(`↓ down ${label}`);
     } catch (error) {
       if (shouldTx) await client.query("ROLLBACK");
       throw new SqlError(`Failed DOWN ${label}: ${(error as Error).message}`);

@@ -29,6 +29,12 @@ NomadJS is a production-ready SQL migration tool for Node.js with advanced featu
    - Environment variable substitution (`${VAR_NAME}` syntax)
    - Auto-loads `.env` files
 
+### Colorized Output
+   - Success/info/warning messages are color-coded when stdout is a TTY
+   - Colors automatically disable when piping output
+   - Set `NO_COLOR` or `NOMAD_NO_COLOR=true` to force monochrome output
+   - Override in CI with `NOMAD_NO_COLOR=false` if ANSI colors are desired
+
 ## CLI Commands
 
 ### `nomad init-config [format]`

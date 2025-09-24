@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import type { PoolClient } from "pg";
 import { LockTimeoutError } from "./errors.js";
+import { logger } from "../utils/logger.js";
 
 export interface LockConfig {
   url: string;
@@ -128,11 +129,11 @@ export class AdvisoryLock {
 
     // Setup signal handlers for cleanup
     const cleanupHandler = async () => {
-      console.log("\nReceived interrupt signal, releasing migration lock...");
+      logger.warn("\nReceived interrupt signal, releasing migration lock...");
       try {
         await this.release(client);
       } catch (error) {
-        console.error("Error releasing lock:", error);
+        logger.error(`Error releasing lock: ${(error as Error).message}`);
       }
       process.exit(130); // Standard exit code for SIGINT
     };
@@ -168,7 +169,7 @@ export class AdvisoryLock {
       return result.rows[0]?.pg_advisory_unlock === true;
     } catch (error) {
       // Log error but don't throw - connection might be closed
-      console.error("Error releasing advisory lock:", error);
+      logger.error(`Error releasing advisory lock: ${(error as Error).message}`);
       return false;
     }
   }

@@ -9,6 +9,7 @@ import { timestampedFilename, writeSqlTemplate, writeDefaultConfig, ConfigFormat
 import { resolveRuntimeConfig } from "./config.js";
 import { formatExitCodesHelp, ConnectionError, ParseConfigError, DriftError, MissingFileError } from "./core/errors.js";
 import type { Config } from "./config.js";
+import { logger } from "./utils/logger.js";
 
 type BaseArgs = {
   url?: string;
@@ -366,12 +367,12 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
         const exitErr = err as any;
         const message = exitErr.message || msg;
         if (message) {
-          console.error(message);
+          logger.error(message);
         }
         process.exit(exitErr.exitCode);
       } else {
         // Otherwise show help and exit with code 1
-        console.error(msg || (err as any)?.message || 'Unknown error');
+        logger.error(msg || (err as any)?.message || 'Unknown error');
         process.exit(1);
       }
     })

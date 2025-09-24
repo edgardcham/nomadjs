@@ -15,6 +15,8 @@ interface HazardPattern {
   pattern: RegExp;
 }
 
+import { logger as nomadLogger } from "../utils/logger.js";
+
 const HAZARD_PATTERNS: HazardPattern[] = [
   {
     type: "CREATE_INDEX_CONCURRENTLY",
@@ -370,7 +372,8 @@ export function validateHazards(
     logger?: (msg: string) => void;
   }
 ): ValidationResult {
-  const { autoNotx = false, logger = console.log } = options || {};
+  const { autoNotx = false, logger: customLogger } = options || {};
+  const logFn = customLogger ?? ((msg: string) => nomadLogger.warn(msg));
 
   if (hazards.length === 0) {
     return {
@@ -388,7 +391,7 @@ export function validateHazards(
 
   if (autoNotx) {
     const hazardTypes = hazards.map(h => h.type).join(", ");
-    logger(`Auto-notx: Disabling transaction due to hazardous operations: ${hazardTypes}`);
+    logFn(`Auto-notx: Disabling transaction due to hazardous operations: ${hazardTypes}`);
     return {
       shouldSkipTransaction: true,
       hazardsDetected: hazards

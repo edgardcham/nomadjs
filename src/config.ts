@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ParseConfigError } from "./core/errors.js";
+import { logger } from "./utils/logger.js";
 
 export type NomadConfigFile = {
   database?: {
@@ -228,7 +229,7 @@ function expandEnvVars(value: string): string {
     const varName = p1 || p2;
     const envValue = process.env[varName];
     if (envValue === undefined) {
-      console.warn(`Warning: Environment variable ${varName} is not defined`);
+      logger.warn(`Environment variable ${varName} is not defined`);
       return match; // Keep original if not found
     }
     return envValue;

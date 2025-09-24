@@ -16,6 +16,7 @@ Production-ready SQL migration tool for Node.js with checksums, transaction cont
 - 🚀 Standardized exit codes for CI/CD integration
 - 🔐 Advisory locking prevents concurrent migrations
 - 📊 JSON output for automation and monitoring
+- 🌈 Color-aware CLI output respecting `NO_COLOR`/`NOMAD_NO_COLOR`
 
 ## Installation & Linking
 
@@ -145,6 +146,11 @@ INSERT INTO logs VALUES (E'Error:\\nFile not found');
 All commands accept `--url`, `--dir`, `--table`, `--allow-drift`, and `--auto-notx` flags.
 
 📚 **Full Documentation:** See [CLI_DOCUMENTATION.md](./CLI_DOCUMENTATION.md) for detailed usage, directives, and examples.
+
+
+## CLI Output & Colors
+
+Nomad prints color-coded status lines (success, warnings, notes) when running in a TTY. Colors automatically turn off when piping output or when you set either `NO_COLOR` or `NOMAD_NO_COLOR=true`. Set `NOMAD_NO_COLOR=false` (or `0`) to force colors back on for automated environments that still support ANSI escape codes.
 
 
 ## Configuration
