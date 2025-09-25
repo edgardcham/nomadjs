@@ -217,6 +217,9 @@ nomad up --tags=users --include-ancestors
 
 # Verbose execution (per-statement timing)
 nomad up --verbose
+
+# Stream JSON events (NDJSON)
+nomad up --events-json
 ```
 
 ### `nomad down [count]`
@@ -231,6 +234,9 @@ nomad down 3
 
 # Rollback only tagged migrations at the head of the stack
 nomad down --tags=seed --count 2
+
+# Stream JSON events (NDJSON)
+nomad down 1 --events-json
 ```
 
 ### `nomad redo`

@@ -63,7 +63,8 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
     allowDrift: args.allowDrift || process.env.NOMAD_ALLOW_DRIFT === "true",
     autoNotx: args.autoNotx || process.env.NOMAD_AUTO_NOTX === "true",
     lockTimeout: args.lockTimeout || parseInt(process.env.NOMAD_LOCK_TIMEOUT || "30000", 10),
-    verbose: (args as any).verbose === true
+    verbose: (args as any).verbose === true,
+    eventsJson: (args as any)["events-json"] === true
   };
   const migrator = new Migrator(config, pool);
 
@@ -124,6 +125,7 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
     .option("only-tagged", { type: "boolean", describe: "Include only migrations that have tags" })
     .option("include-ancestors", { type: "boolean", describe: "With --tags, include earlier pending migrations up to the first match" })
     .option("verbose", { type: "boolean", describe: "Verbose execution with per-statement logs and timings" })
+    .option("events-json", { type: "boolean", describe: "Stream newline-delimited JSON events to stdout" })
     .epilogue(`Exit Codes:\n${formatExitCodesHelp()}`);
 
   cli.command(

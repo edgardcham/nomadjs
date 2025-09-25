@@ -31,6 +31,7 @@ export interface Config {
   autoNotx?: boolean;
   lockTimeout?: number;
   verbose?: boolean;
+  eventsJson?: boolean;
 }
 
 export type ResolveConfigOptions = {

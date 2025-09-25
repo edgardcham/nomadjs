@@ -388,6 +388,32 @@ Notes:
 - For `down`, Nomad only rolls back the contiguous head of matching migrations; it never skips over a newer, non-matching migration.
 - For `up`, use `--include-ancestors` to pull in earlier pending migrations up to the first matching tag when prerequisites are needed.
 
+## JSON Events
+
+Nomad can stream newline-delimited JSON events for CI/observability.
+
+```bash
+# Human logs + JSON events to stdout
+nomad up --events-json
+
+# Combine with verbose for both streams
+nomad up --events-json --verbose
+```
+
+Example events:
+
+```
+{"event":"lock-acquired","ts":"2025-09-24T20:00:00.000Z"}
+{"event":"apply-start","direction":"up","version":"20250923052647","name":"initialize_db","ts":"..."}
+{"event":"stmt-run","direction":"up","version":"20250923052647","ms":5,"preview":"CREATE TABLE users ..."}
+{"event":"apply-end","direction":"up","version":"20250923052647","name":"initialize_db","ms":23,"ts":"..."}
+{"event":"lock-released","ts":"..."}
+```
+
+Notes:
+- Events are emitted to stdout as one JSON object per line (NDJSON).
+- Human logs (including `--verbose`) remain colorized and readable.
+
 ## Publishing Notes
 
 When you are ready to publish to npm:

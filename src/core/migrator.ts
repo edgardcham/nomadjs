@@ -11,6 +11,7 @@ import { matchesFilter, type TagFilter } from "./tags.js";
 import type { Config } from "../config.js";
 import type { Pool } from "pg";
 import { logger } from "../utils/logger.js";
+import { emitEvent, previewSql } from "../utils/events.js";
 
 export interface MigrationFile {
   version: bigint;
@@ -517,6 +518,8 @@ export class Migrator {
         retryDelay: 100,
         maxRetryDelay: 5000
       });
+      emitEvent(this.config.eventsJson, { event: "lock-acquired", ts: new Date().toISOString() });
+      emitEvent(this.config.eventsJson, { event: "lock-acquired", ts: new Date().toISOString() });
 
       await this.ensureTable();
 
@@ -594,6 +597,7 @@ export class Migrator {
       if (cleanup) {
         await cleanup();
         cleanup = undefined;
+        emitEvent(this.config.eventsJson, { event: "lock-released", ts: new Date().toISOString() });
       }
       client.release();
     }
@@ -667,8 +671,10 @@ export class Migrator {
         if (this.config.verbose) {
           logger.action(`→ executing m${idx + 1}/${totalMigrations} ${migration.version} (${migration.name})`);
         }
+        emitEvent(this.config.eventsJson, { event: "apply-start", direction: "up", version: String(migration.version), name: migration.name, ts: new Date().toISOString() });
         const res = await this.applyUpWithClient(migration, client);
         totalStatements += res.statements;
+        emitEvent(this.config.eventsJson, { event: "apply-end", direction: "up", version: String(migration.version), name: migration.name, ms: res.ms, ts: new Date().toISOString() });
         if (this.config.verbose) {
           logger.success(`✓ done m${idx + 1}/${totalMigrations} (${res.ms}ms, ${res.statements} stmt${res.statements === 1 ? '' : 's'})`);
         }
@@ -687,6 +693,7 @@ export class Migrator {
       if (cleanup) {
         await cleanup();
         cleanup = undefined;
+        emitEvent(this.config.eventsJson, { event: "lock-released", ts: new Date().toISOString() });
       }
       client.release();
     }
@@ -715,6 +722,7 @@ export class Migrator {
         retryDelay: 100,
         maxRetryDelay: 5000
       });
+      emitEvent(this.config.eventsJson, { event: "lock-acquired", ts: new Date().toISOString() });
 
       // Now proceed with rollback
       await this.ensureTable();
@@ -792,6 +800,7 @@ export class Migrator {
       if (cleanup) {
         await cleanup();
         cleanup = undefined;
+        emitEvent(this.config.eventsJson, { event: "lock-released", ts: new Date().toISOString() });
       }
       client.release();
     }
@@ -1032,11 +1041,12 @@ export class Migrator {
         const statement = migration.parsed.up.statements[i]!;
         const start = Date.now();
         await client.query(statement);
+        const ms = Date.now() - start;
+        const preview = statement.length > 60 ? statement.slice(0, 57) + "..." : statement;
         if (this.config.verbose) {
-          const ms = Date.now() - start;
-          const preview = statement.length > 60 ? statement.slice(0, 57) + "..." : statement;
           logger.info(`s${i + 1}/${total} (${ms}ms): ${preview}`);
         }
+        emitEvent(this.config.eventsJson, { event: "stmt-run", direction: "up", version: String(migration.version), ms, preview: previewSql(statement) });
       }
 
       await client.query(
@@ -1102,11 +1112,12 @@ export class Migrator {
         const statement = migration.parsed.down.statements[i]!;
         const start = Date.now();
         await client.query(statement);
+        const ms = Date.now() - start;
+        const preview = statement.length > 60 ? statement.slice(0, 57) + "..." : statement;
         if (this.config.verbose) {
-          const ms = Date.now() - start;
-          const preview = statement.length > 60 ? statement.slice(0, 57) + "..." : statement;
           logger.info(`s${i + 1}/${total} (${ms}ms): ${preview}`);
         }
+        emitEvent(this.config.eventsJson, { event: "stmt-run", direction: "down", version: String(migration.version), ms, preview: previewSql(statement) });
       }
 
       await client.query(
