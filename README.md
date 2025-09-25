@@ -142,6 +142,7 @@ INSERT INTO logs VALUES (E'Error:\\nFile not found');
 | `nomad to <version>` | Migrate to specific version |
 | `nomad redo` | Rollback and reapply the last migration (safe for development; last migration only) |
 | `nomad verify` | Verify migration checksums |
+| `nomad doctor` | Diagnose configuration and database readiness |
 
 All commands accept `--url`, `--dir`, `--table`, `--allow-drift`, and `--auto-notx` flags.
 
@@ -325,6 +326,35 @@ npm run test -- test/cli/exit-codes-integration.test.ts
 - **CLI Integration**: Command-line interface and exit codes (opt-in with `NOMAD_TEST_WITH_DB=true`)
 
 Unit and core integration tests run entirely in-memory; the CLI suites require a reachable PostgreSQL instance and are skipped unless you opt in.
+
+## `nomad doctor`
+
+Run Nomad's health check to verify filesystem, configuration, and database prerequisites:
+
+```bash
+nomad doctor
+
+# JSON output for CI
+nomad doctor --json
+
+# Attempt to create missing schema/table automatically
+nomad doctor --fix
+```
+
+Sample output:
+
+```
+▶ Target Environment
+Connected to postgres://postgres@localhost/nomaddb as postgres
+▶ Diagnostics
+PASS  Database connection: Connected to nomaddb as postgres
+PASS  Schema availability: Schema "public" exists
+WARN  Migrations table: Version table "public"."nomad_migrations" does not exist
+PASS  Advisory lock: Advisory lock acquired and released successfully
+Summary: 3 pass, 1 warn, 0 fail
+```
+
+Warnings keep the exit code at 0 so you can surface issues without breaking CI. Use `nomad doctor --json` to capture machine-readable reports.
 
 ## Publishing Notes
 

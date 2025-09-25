@@ -10,6 +10,7 @@ import { resolveRuntimeConfig } from "./config.js";
 import { formatExitCodesHelp, ConnectionError, ParseConfigError, DriftError, MissingFileError } from "./core/errors.js";
 import type { Config } from "./config.js";
 import { logger } from "./utils/logger.js";
+import { runDoctor, type DoctorReport } from "./core/doctor.js";
 
 type BaseArgs = {
   url?: string;
@@ -358,6 +359,67 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
     }
   );
 
+  cli.command(
+    "doctor",
+    "Run environment diagnostics",
+    (yy) =>
+      yy
+        .option("json", {
+          type: "boolean",
+          describe: "Output report as JSON"
+        })
+        .option("fix", {
+          type: "boolean",
+          describe: "Attempt safe fixes (create schema/table)"
+        }),
+    async (argv) => {
+      const runtime = resolveRuntimeConfig({
+        cli: {
+          url: argv.url as string | undefined,
+          dir: argv.dir as string | undefined,
+          table: argv.table as string | undefined,
+          schema: argv.schema as string | undefined
+        },
+        cwd: process.cwd(),
+        configPath: argv.config as string | undefined
+      });
+
+      if (!runtime.url) {
+        throw new ParseConfigError("DATABASE_URL is not set (provide via --url, config file, or environment variable)");
+      }
+
+      const pool = new Pool({ connectionString: runtime.url });
+      const config: Config = {
+        driver: "postgres",
+        url: runtime.url,
+        dir: runtime.dir,
+        table: runtime.table,
+        schema: runtime.schema,
+        allowDrift: argv.allowDrift || process.env.NOMAD_ALLOW_DRIFT === "true",
+        autoNotx: argv.autoNotx || process.env.NOMAD_AUTO_NOTX === "true",
+        lockTimeout: argv.lockTimeout || parseInt(process.env.NOMAD_LOCK_TIMEOUT || "30000", 10)
+      };
+
+      try {
+        const report = await runDoctor(config, pool, { fix: argv.fix === true });
+        const connectionFailure = report.checks.find(check => check.id === "connect" && check.status === "fail");
+
+        if (argv.json) {
+          const jsonReport = serializeDoctorReport(report);
+          console.log(JSON.stringify(jsonReport, null, 2));
+        } else {
+          printDoctorReport(report);
+        }
+
+        if (connectionFailure) {
+          throw new ConnectionError(connectionFailure.message);
+        }
+      } finally {
+        await pool.end();
+      }
+    }
+  );
+
   await cli
     .demandCommand(1)
     .help()
@@ -378,3 +440,68 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
     })
     .parseAsync();
 })();
+
+function redactConnectionString(url?: string): string | undefined {
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url);
+    if (parsed.password) {
+      parsed.password = "****";
+    }
+    return parsed.toString();
+  } catch {
+    return url.replace(/:(?:[^:@/]+)@/, ":****@");
+  }
+}
+
+function serializeDoctorReport(report: DoctorReport) {
+  return {
+    ok: report.ok,
+    summary: report.summary,
+    config: report.config ? {
+      ...report.config,
+      url: redactConnectionString(report.config.url)
+    } : undefined,
+    environment: report.environment,
+    checks: report.checks
+  };
+}
+
+function printDoctorReport(report: DoctorReport): void {
+  if (report.config) {
+    const redactedUrl = redactConnectionString(report.config.url);
+    logger.action("Target Environment");
+    if (redactedUrl) {
+      logger.info(`Database: ${redactedUrl}`);
+    }
+    logger.info(`Schema: ${report.config.schema}`);
+    logger.info(`Version table: ${report.config.table}`);
+    logger.info(`Migrations dir: ${report.config.dir}`);
+  }
+
+  logger.action("Diagnostics");
+  for (const check of report.checks) {
+    const line = `${check.title}: ${check.message}`;
+    if (check.status === "pass") {
+      logger.success(`PASS  ${line}`);
+    } else if (check.status === "warn") {
+      logger.warn(`WARN  ${line}`);
+    } else {
+      logger.error(`FAIL  ${line}`);
+    }
+    if (check.suggestions?.length) {
+      for (const suggestion of check.suggestions) {
+        logger.info(`  → ${suggestion}`);
+      }
+    }
+  }
+
+  const summaryLine = `Summary: ${report.summary.pass} pass, ${report.summary.warn} warn, ${report.summary.fail} fail`;
+  if (report.summary.fail > 0) {
+    logger.error(summaryLine);
+  } else if (report.summary.warn > 0) {
+    logger.warn(summaryLine);
+  } else {
+    logger.success(summaryLine);
+  }
+}

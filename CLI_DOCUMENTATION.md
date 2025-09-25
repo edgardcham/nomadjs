@@ -246,6 +246,23 @@ nomad verify
 #   - 20250921123146: file missing
 ```
 
+### `nomad doctor`
+Run readiness diagnostics against your configuration and the target PostgreSQL instance.
+
+```bash
+nomad doctor
+nomad doctor --json            # machine-readable report
+nomad doctor --fix             # create schema/table if missing
+```
+
+Checks performed:
+- Database connectivity (current user, database, timezone, encoding)
+- Schema availability (optional creation with `--fix`)
+- Presence of the Nomad migrations table (`--fix` can bootstrap it safely)
+- Advisory lock acquisition (verifies concurrency safeguards)
+
+Warnings keep the exit code at 0 so you can surface issues without breaking pipelines. Connection failures exit with code 7. Use `--json` in CI to capture the full report.
+
 <!-- Removed outdated 'Coming Soon' section; 'plan' is implemented above. -->
 
 ## Migration Directives
