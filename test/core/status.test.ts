@@ -172,6 +172,71 @@ describe("Status Command", () => {
     });
   });
 
+  describe("Tag filtering in status", () => {
+    it("should include tags and filter by tags", async () => {
+      listMigrationFilesMock.mockReturnValue([
+        "/test/migrations/20240101120000_seed.sql",
+        "/test/migrations/20240102130000_users.sql"
+      ]);
+
+      const content = "SELECT 1;";
+      readFileSyncMock.mockReturnValue(content);
+      // First file tagged seed, second untagged
+      parseNomadSqlFileMock.mockImplementation((filepath: string) => {
+        const isSeed = String(filepath).includes("20240101120000_seed");
+        return {
+          up: { statements: [content], notx: false },
+          down: { statements: [], notx: false },
+          noTransaction: false,
+          tags: isSeed ? ["seed"] : undefined
+        };
+      });
+
+      queryMock
+        .mockResolvedValueOnce({ rows: [] }) // ensureTable
+        .mockResolvedValueOnce({ rows: [] }) // no applied
+        .mockResolvedValue({ rows: [] }); // subsequent calls
+
+      const all = await migrator.status();
+      expect(all).toHaveLength(2);
+      expect(all[0].tags).toEqual(["seed"]);
+
+      const filtered = await migrator.status({ tags: ["seed"] } as any);
+      expect(filtered).toHaveLength(1);
+      expect(filtered[0].name).toContain("seed");
+      expect(filtered[0].tags).toEqual(["seed"]);
+    });
+
+    it("should exclude DB-only missing entries when a filter is active", async () => {
+      listMigrationFilesMock.mockReturnValue([
+        "/test/migrations/20240101120000_seed.sql"
+      ]);
+
+      const content = "SELECT 1;";
+      readFileSyncMock.mockReturnValue(content);
+      parseNomadSqlFileMock.mockReturnValue({
+        up: { statements: [content], notx: false },
+        down: { statements: [], notx: false },
+        noTransaction: false,
+        tags: ["seed"]
+      });
+
+      // Applied includes an extra version that has no file (missing)
+      queryMock
+        .mockResolvedValueOnce({ rows: [] }) // ensureTable
+        .mockResolvedValueOnce({
+          rows: [
+            { version: "20240101120000", name: "seed", checksum: calculateChecksum(content), applied_at: new Date(), rolled_back_at: null },
+            { version: "20240102130000", name: "ghost", checksum: calculateChecksum(content), applied_at: new Date(), rolled_back_at: null }
+          ]
+        });
+
+      const filtered = await migrator.status({ tags: ["seed"] } as any);
+      // Only the file-backed seed migration should appear
+      expect(filtered.every(r => r.name !== "ghost")).toBe(true);
+    });
+  });
+
   describe("Drift Detection", () => {
     it("should detect drift when file checksum doesn't match", async () => {
       const originalContent = "CREATE TABLE users (id INT);";

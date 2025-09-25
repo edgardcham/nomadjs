@@ -99,6 +99,8 @@ Show the status of all migrations.
 
 ```bash
 nomad status
+nomad status --tags=seed
+nomad status --only-tagged
 
 # Output:
 # applied  20250921123045  add_users       2025-09-21T12:31:00.000Z
@@ -143,6 +145,8 @@ nomad status --json
 
 **Options**:
 - `--json` - Output status as JSON for CI/automation
+- `--tags=tag1,tag2` - Include only migrations with any of these tags (OR)
+- `--only-tagged` - Include only migrations that have tags
 
 **Exit Codes**:
 - `0` - Success
@@ -192,6 +196,8 @@ Warnings: 1 hazardous operation detected
 - `--to <version>` - Target version to plan to
 - `--json` - Output as JSON for CI/automation
 - `--dry-run` - Execute migrations but rollback (test run)
+- `--tags=tag1,tag2` - Include migrations with any of the tags (OR)
+- `--only-tagged` - Include only migrations that have tags
 
 ### `nomad up [limit]`
 Apply pending migrations.
@@ -202,6 +208,12 @@ nomad up
 
 # Apply only next 2 migrations
 nomad up 2
+
+# Apply only tagged migrations
+nomad up --tags=seed
+
+# Include earlier pending prerequisites up to first matching tag
+nomad up --tags=users --include-ancestors
 ```
 
 ### `nomad down [count]`
@@ -213,6 +225,9 @@ nomad down
 
 # Rollback last 3 migrations
 nomad down 3
+
+# Rollback only tagged migrations at the head of the stack
+nomad down --tags=seed --count 2
 ```
 
 ### `nomad redo`

@@ -7,6 +7,7 @@ import { detectHazards, validateHazards } from "./hazards.js";
 import { AdvisoryLock } from "./advisory-lock.js";
 import { DriftError, MissingFileError, SqlError, ConnectionError, ChecksumMismatchError, LockTimeoutError } from "./errors.js";
 import { Planner, type PlanOptions, type MigrationPlan } from "./planner.js";
+import { matchesFilter, type TagFilter } from "./tags.js";
 import type { Config } from "../config.js";
 import type { Pool } from "pg";
 import { logger } from "../utils/logger.js";
@@ -36,6 +37,7 @@ export interface MigrationStatus {
   hasDrift?: boolean;
   isMissing?: boolean;
   hasLegacyChecksum?: boolean;
+  tags?: string[];
 }
 
 export interface VerifyResult {
@@ -215,7 +217,7 @@ export class Migrator {
   /**
    * Get migration status with drift detection
    */
-  async status(): Promise<MigrationStatus[]> {
+  async status(filter?: TagFilter): Promise<MigrationStatus[]> {
     await this.ensureTable();
 
     const files = await this.loadMigrationFiles();
@@ -228,14 +230,16 @@ export class Migrator {
     let hasDrift = false;
     let hasMissing = false;
 
-    // Check files on disk
-    for (const file of files) {
+    // Check files on disk (respect optional filter)
+    const iterFiles = filter ? files.filter(f => matchesFilter(f.parsed.tags, filter)) : files;
+    for (const file of iterFiles) {
       const appliedMig = appliedMap.get(file.version);
       const status: MigrationStatus = {
         version: file.version,
         name: file.name,
         applied: !!appliedMig && !appliedMig.rolledBackAt,
-        appliedAt: appliedMig?.appliedAt
+        appliedAt: appliedMig?.appliedAt,
+        tags: file.parsed.tags
       };
 
       if (appliedMig) {
@@ -250,24 +254,26 @@ export class Migrator {
       results.push(status);
     }
 
-    // Check for missing files
-    for (const appliedMig of applied) {
-      if (!appliedMig.rolledBackAt && !fileMap.has(appliedMig.version)) {
-        const missingStatus: MigrationStatus = {
-          version: appliedMig.version,
-          name: appliedMig.name,
-          applied: true,
-          appliedAt: appliedMig.appliedAt,
-          isMissing: true
-        };
+    // Check for missing files (skip when filter is active since tags are unknown)
+    if (!filter) {
+      for (const appliedMig of applied) {
+        if (!appliedMig.rolledBackAt && !fileMap.has(appliedMig.version)) {
+          const missingStatus: MigrationStatus = {
+            version: appliedMig.version,
+            name: appliedMig.name,
+            applied: true,
+            appliedAt: appliedMig.appliedAt,
+            isMissing: true
+          };
 
-        // Check if it's a legacy migration without checksum
-        if (!appliedMig.checksum) {
-          missingStatus.hasLegacyChecksum = true;
+          // Check if it's a legacy migration without checksum
+          if (!appliedMig.checksum) {
+            missingStatus.hasLegacyChecksum = true;
+          }
+
+          results.push(missingStatus);
+          hasMissing = true;
         }
-
-        results.push(missingStatus);
-        hasMissing = true;
       }
     }
 
@@ -341,7 +347,7 @@ export class Migrator {
   /**
    * Plan migrations up (preview without applying)
    */
-  async planUp(options: PlanOptions = {}): Promise<MigrationPlan> {
+  async planUp(options: PlanOptions & { filter?: TagFilter; includeAncestors?: boolean } = {}): Promise<MigrationPlan> {
     await this.ensureTable();
 
     const files = await this.loadMigrationFiles();
@@ -352,10 +358,35 @@ export class Migrator {
         .map(a => a.version.toString())
     );
 
-    const pending = files.filter(f => !appliedVersions.has(f.version.toString()));
+    const isPending = (f: MigrationFile) => !appliedVersions.has(f.version.toString());
+    let pendingAll = files.filter(isPending);
+    let pending: MigrationFile[];
+    let warnings: string[] = [];
+    if (options.filter) {
+      const selected = pendingAll.filter(f => matchesFilter(f.parsed.tags, options.filter!));
+      if (options.includeAncestors) {
+        if (selected.length === 0) {
+          pending = [];
+        } else {
+          const earliest = selected[0]!.version;
+          pending = files.filter(f => isPending(f) && (f.version <= earliest || matchesFilter(f.parsed.tags, options.filter!)));
+        }
+      } else {
+        pending = selected;
+        // Warn if earlier pending exist before the first selected
+        if (selected.length > 0) {
+          const minSel = selected[0]!.version;
+          const earlierPending = pendingAll.some(f => f.version < minSel);
+          if (earlierPending) {
+            warnings.push("Tag filter excludes earlier pending migrations; use --include-ancestors to include prerequisites.");
+          }
+        }
+      }
+    } else {
+      pending = pendingAll;
+    }
 
     // Check for checksum mismatches
-    const warnings: string[] = [];
     for (const file of files) {
       const appliedMig = applied.find(a => a.version === file.version);
       if (appliedMig && appliedMig.checksum !== file.checksum) {
@@ -377,7 +408,7 @@ export class Migrator {
   /**
    * Plan migrations down (preview rollback)
    */
-  async planDown(options: PlanOptions = {}): Promise<MigrationPlan> {
+  async planDown(options: PlanOptions & { filter?: TagFilter } = {}): Promise<MigrationPlan> {
     await this.ensureTable();
 
     const files = await this.loadMigrationFiles();
@@ -392,8 +423,24 @@ export class Migrator {
         return 0;
       });
 
-    // Map to migration files and check for missing files
+    // Determine contiguous head based on filter (if any)
     const toRollback: MigrationFile[] = [];
+    if (options.filter) {
+      for (const a of activeApplied) {
+        const file = fileMap.get(a.version);
+        if (!file) continue;
+        if (matchesFilter(file.parsed.tags, options.filter)) {
+          toRollback.push(file);
+        } else {
+          break; // stop at first non-matching
+        }
+      }
+    } else {
+      for (const a of activeApplied) {
+        const file = fileMap.get(a.version);
+        if (file) toRollback.push(file);
+      }
+    }
     const errors: string[] = [];
     const warnings: string[] = [];
 
@@ -406,12 +453,12 @@ export class Migrator {
         if (appliedMig.checksum && appliedMig.checksum !== file.checksum && !this.config.allowDrift) {
           warnings.push(`Checksum mismatch detected for version ${appliedMig.version}`);
         }
-        toRollback.push(file);
       }
     }
 
     const planner = new Planner(this.config.autoNotx);
-    const plan = planner.planDown(toRollback, options);
+    const limited = typeof options.count === "number" ? toRollback.slice(0, Math.max(options.count, 0)) : toRollback;
+    const plan = planner.planDown(limited, options);
 
     if (errors.length > 0) {
       plan.errors = errors;
@@ -554,7 +601,7 @@ export class Migrator {
   /**
    * Apply migrations up
    */
-  async up(limit?: number): Promise<void> {
+  async up(limit?: number, filter?: TagFilter, includeAncestors?: boolean): Promise<void> {
     // Acquire advisory lock
     const lock = new AdvisoryLock({
       url: this.config.url,
@@ -586,7 +633,18 @@ export class Migrator {
           .map(a => a.version.toString())
       );
 
-      const pending = files.filter(f => !appliedVersions.has(f.version.toString()));
+      const isPending = (f: MigrationFile) => !appliedVersions.has(f.version.toString());
+      const pendingAll = files.filter(isPending);
+      let pending = pendingAll;
+      if (filter) {
+        const selected = pendingAll.filter(f => matchesFilter(f.parsed.tags, filter));
+        if (includeAncestors && selected.length > 0) {
+          const earliest = selected[0]!.version;
+          pending = files.filter(f => isPending(f) && (f.version <= earliest || matchesFilter(f.parsed.tags, filter)));
+        } else {
+          pending = selected;
+        }
+      }
       const toApply = typeof limit === "number" ? pending.slice(0, Math.max(limit, 0)) : pending;
 
       logger.action(`Applying ${toApply.length} migration(s) (${pending.length} pending out of ${files.length})`);
@@ -612,7 +670,7 @@ export class Migrator {
   /**
    * Rollback migrations down
    */
-  async down(count = 1): Promise<void> {
+  async down(count = 1, filter?: TagFilter): Promise<void> {
     // Acquire advisory lock
     const lock = new AdvisoryLock({
       url: this.config.url,
@@ -646,10 +704,26 @@ export class Migrator {
           if (b.version < a.version) return -1;
           if (b.version > a.version) return 1;
           return 0;
-        })
-        .slice(0, Math.max(count, 0));
+        });
 
-      for (const appliedMig of activeApplied) {
+      const toRollbackApplied = [] as typeof activeApplied;
+      if (filter) {
+        for (const a of activeApplied) {
+          const f = fileMap.get(a.version);
+          if (!f) continue;
+          if (matchesFilter(f.parsed.tags, filter)) {
+            toRollbackApplied.push(a);
+          } else {
+            break;
+          }
+        }
+      } else {
+        toRollbackApplied.push(...activeApplied);
+      }
+
+      const limitedApplied = toRollbackApplied.slice(0, Math.max(count, 0));
+
+      for (const appliedMig of limitedApplied) {
         const file = fileMap.get(appliedMig.version);
         if (!file) {
           throw new MissingFileError([`${appliedMig.version}_${appliedMig.name}`]);

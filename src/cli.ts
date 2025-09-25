@@ -119,6 +119,9 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
     .option("allow-drift", { type: "boolean", describe: "Allow migrations with checksum mismatches (DANGEROUS)" })
     .option("auto-notx", { type: "boolean", describe: "Auto-disable transactions for hazardous operations" })
     .option("lock-timeout", { type: "number", describe: "Timeout for acquiring migration lock in ms (default: 30000)" })
+    .option("tags", { type: "string", describe: "Filter by tags (comma-separated, OR logic)" })
+    .option("only-tagged", { type: "boolean", describe: "Include only migrations that have tags" })
+    .option("include-ancestors", { type: "boolean", describe: "With --tags, include earlier pending migrations up to the first match" })
     .epilogue(`Exit Codes:\n${formatExitCodesHelp()}`);
 
   cli.command(
@@ -131,7 +134,8 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
       }),
     async (argv) => {
       await withMigrator(argv as BaseArgs, async (migrator) => {
-        const rows = await migrator.status();
+        const filter = parseTagFilter(argv.tags as string | undefined, (argv as any)["only-tagged"]);
+        const rows = await migrator.status(filter);
 
         if ((argv as any).json) {
           // Output as JSON (convert BigInt to string for serialization)
@@ -157,7 +161,9 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
     (yy) => yy.positional("limit", { type: "number" }),
     async (argv) => {
       const limit = typeof argv.limit === "number" ? argv.limit : undefined;
-      await withMigrator(argv as UpArgs, (migrator) => migrator.up(limit));
+      const filter = parseTagFilter(argv.tags as string | undefined, (argv as any)["only-tagged"]);
+      const includeAncestors = (argv as any)["include-ancestors"] === true;
+      await withMigrator(argv as UpArgs, (migrator) => migrator.up(limit, filter, includeAncestors));
     }
   );
 
@@ -167,7 +173,8 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
     (yy) => yy.positional("count", { type: "number", default: 1 }),
     async (argv) => {
       const count = typeof argv.count === "number" ? argv.count : 1;
-      await withMigrator(argv as DownArgs, (migrator) => migrator.down(count));
+      const filter = parseTagFilter(argv.tags as string | undefined, (argv as any)["only-tagged"]);
+      await withMigrator(argv as DownArgs, (migrator) => migrator.down(count, filter));
     }
   );
 
@@ -269,20 +276,29 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
             format: argv.json ? "json" : "human",
             dryRun: argv.dryRun
           });
+          const filter = parseTagFilter(argv.tags as string | undefined, (argv as any)["only-tagged"]);
+          if (filter) {
+            logger.warn("Tag filters are ignored for 'plan --to'.");
+          }
         } else if (argv.direction === "down") {
           // Plan down migrations
           const count = argv.count || 1;
+          const filter = parseTagFilter(argv.tags as string | undefined, (argv as any)["only-tagged"]);
           plan = await migrator.planDown({
             count,
             format: argv.json ? "json" : "human",
-            dryRun: argv.dryRun
+            dryRun: argv.dryRun,
+            filter
           });
         } else {
           // Plan up migrations (default)
+          const filter = parseTagFilter(argv.tags as string | undefined, (argv as any)["only-tagged"]);
           plan = await migrator.planUp({
             limit: argv.limit,
             format: argv.json ? "json" : "human",
-            dryRun: argv.dryRun
+            dryRun: argv.dryRun,
+            filter,
+            includeAncestors: (argv as any)["include-ancestors"] === true
           });
         }
 
@@ -504,4 +520,14 @@ function printDoctorReport(report: DoctorReport): void {
   } else {
     logger.success(summaryLine);
   }
+}
+
+function parseTagFilter(tagsArg?: string, onlyTagged?: boolean) {
+  const tags = (tagsArg || "")
+    .split(/[,\s]+/)
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+  const unique = Array.from(new Set(tags));
+  if (unique.length === 0 && !onlyTagged) return undefined;
+  return { tags: unique.length ? unique : undefined, onlyTagged: !!onlyTagged };
 }

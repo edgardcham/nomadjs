@@ -356,6 +356,37 @@ Summary: 3 pass, 1 warn, 0 fail
 
 Warnings keep the exit code at 0 so you can surface issues without breaking CI. Use `nomad doctor --json` to capture machine-readable reports.
 
+## Tag Filtering
+
+You can tag migrations and selectively operate on them.
+
+Add tags in SQL:
+
+```sql
+-- +nomad tags: seed, users
+-- +nomad Up
+INSERT INTO users VALUES (1, 'seed');
+-- +nomad Down
+DELETE FROM users WHERE id = 1;
+```
+
+Use filters:
+
+```bash
+nomad status --tags=seed            # show only seed migrations
+nomad up --tags=seed               # apply only seed-tagged pending migrations
+nomad up --tags=users --include-ancestors  # include earlier pending prerequisites
+nomad down --tags=seed --count 2   # rollback only the head of seed-tagged migrations
+nomad plan --tags=users            # preview only user-tagged migrations
+nomad status --only-tagged         # show only migrations that have any tags
+```
+
+Notes:
+- Matching is OR across tags and case-insensitive.
+- Tags apply to the entire migration (both Up and Down).
+- For `down`, Nomad only rolls back the contiguous head of matching migrations; it never skips over a newer, non-matching migration.
+- For `up`, use `--include-ancestors` to pull in earlier pending migrations up to the first matching tag when prerequisites are needed.
+
 ## Publishing Notes
 
 When you are ready to publish to npm:

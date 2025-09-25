@@ -1,5 +1,6 @@
 import { detectHazards } from "./hazards.js";
 import type { Hazard } from "./hazards.js";
+import type { TagFilter } from "./tags.js";
 import type { MigrationFile } from "./migrator.js";
 
 export interface PlanOptions {
@@ -8,6 +9,9 @@ export interface PlanOptions {
   version?: bigint;      // For to command
   format?: "human" | "json";
   dryRun?: boolean;
+  // Not used by Planner; consumed in Migrator before planning
+  filter?: TagFilter;
+  includeAncestors?: boolean;
 }
 
 export interface PlannedMigration {
