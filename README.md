@@ -41,6 +41,7 @@ To unlink later, run `npm unlink --global nomadjs` and `npm unlink nomadjs` in a
 
 ```bash
 nomad create init_schema
+nomad create seed_data --block   # scaffold COPY stdin block template
 # edit migrations/<timestamp>_init_schema.sql to add real SQL
 nomad up
 nomad status
@@ -112,6 +113,8 @@ COPY users (id, name) FROM stdin;
 -- +nomad endblock
 ```
 
+Generate this template automatically with `nomad create <name> --block`.
+
 **PostgreSQL Support** - Full support for advanced PostgreSQL features:
 ```sql
 -- Dollar quotes for functions
@@ -134,7 +137,7 @@ INSERT INTO logs VALUES (E'Error:\\nFile not found');
 | Command | Description |
 |---------|-------------|
 | `nomad init-config [format]` | Create config file template (TOML/JSON) |
-| `nomad create <name>` | Create timestamped migration file |
+| `nomad create <name>` | Create timestamped migration file (`--block` adds COPY block template) |
 | `nomad status` | Show migration status with drift detection |
 | `nomad plan [direction]` | Preview migration plan without executing |
 | `nomad up [limit]` | Apply pending migrations |

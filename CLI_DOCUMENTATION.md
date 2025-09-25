@@ -83,6 +83,9 @@ Create a new migration file with timestamp prefix.
 ```bash
 nomad create add_users_table
 # Creates: migrations/20250921123045_add_users_table.sql
+
+nomad create seed_users --block
+# Creates: migrations/<timestamp>_seed_users.sql with COPY block template
 ```
 
 **Migration Template**:
@@ -92,6 +95,22 @@ nomad create add_users_table
 
 -- +nomad Down
 -- SQL for rollback goes here
+```
+
+**Block Template (`--block`)**:
+```sql
+-- +nomad Up
+-- +nomad block
+-- Place multi-line statements here (e.g., COPY FROM stdin)
+-- Example:
+-- COPY my_table (col1, col2) FROM stdin;
+-- 1	Alice
+-- 2	Bob
+-- \.
+-- +nomad endblock
+
+-- +nomad Down
+-- write your down migration here
 ```
 
 ### `nomad status`

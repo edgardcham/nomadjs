@@ -327,7 +327,13 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
   cli.command(
     "create <name>",
     "Create a new timestamped SQL migration",
-    (yy) => yy.positional("name", { type: "string", demandOption: true }),
+    (yy) =>
+      yy
+        .positional("name", { type: "string", demandOption: true })
+        .option("block", {
+          type: "boolean",
+          describe: "Use a block template for multi-line statements"
+        }),
     async (argv) => {
       const runtime = resolveRuntimeConfig({
         cli: { dir: argv.dir as string | undefined },
@@ -336,7 +342,7 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
       });
       const file = timestampedFilename(runtime.dir, argv.name as string);
       mkdirSync(dirname(file), { recursive: true });
-      writeSqlTemplate(file);
+      writeSqlTemplate(file, { block: (argv as any).block === true });
       console.log(file);
     }
   );

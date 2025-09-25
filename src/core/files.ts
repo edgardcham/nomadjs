@@ -1,6 +1,10 @@
 import { readdirSync, writeFileSync } from "node:fs";
 import { join, basename } from "node:path";
 
+export type SqlTemplateOptions = {
+  block?: boolean;
+};
+
 export function listMigrationFiles(dir: string): string[] {
   const files = readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith(".sql"))
@@ -22,8 +26,22 @@ export function timestampedFilename(dir: string, name: string): string {
   return join(dir, file);
 }
 
-export function writeSqlTemplate(filePath: string): void {
-  const tpl = `-- +nomad Up
+export function writeSqlTemplate(filePath: string, options: SqlTemplateOptions = {}): void {
+  const tpl = options.block
+    ? `-- +nomad Up
+-- +nomad block
+-- Place multi-line statements here (e.g., COPY FROM stdin)
+-- Example:
+-- COPY my_table (col1, col2) FROM stdin;
+-- 1\tAlice
+-- 2\tBob
+-- \\.
+-- +nomad endblock
+
+-- +nomad Down
+-- write your down migration here
+`
+    : `-- +nomad Up
 -- write your up migration here
 
 -- +nomad Down
