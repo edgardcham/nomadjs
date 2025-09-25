@@ -30,6 +30,7 @@ export interface Config {
   allowDrift?: boolean;
   autoNotx?: boolean;
   lockTimeout?: number;
+  verbose?: boolean;
 }
 
 export type ResolveConfigOptions = {

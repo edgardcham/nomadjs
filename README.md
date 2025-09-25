@@ -376,6 +376,7 @@ Use filters:
 nomad status --tags=seed            # show only seed migrations
 nomad up --tags=seed               # apply only seed-tagged pending migrations
 nomad up --tags=users --include-ancestors  # include earlier pending prerequisites
+nomad up --verbose                         # per-statement timing and detailed logs
 nomad down --tags=seed --count 2   # rollback only the head of seed-tagged migrations
 nomad plan --tags=users            # preview only user-tagged migrations
 nomad status --only-tagged         # show only migrations that have any tags

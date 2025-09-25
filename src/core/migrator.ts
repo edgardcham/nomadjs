@@ -370,6 +370,7 @@ export class Migrator {
         } else {
           const earliest = selected[0]!.version;
           pending = files.filter(f => isPending(f) && (f.version <= earliest || matchesFilter(f.parsed.tags, options.filter!)));
+          warnings.push(`Including ancestors up to ${earliest}`);
         }
       } else {
         pending = selected;
@@ -641,16 +642,40 @@ export class Migrator {
         if (includeAncestors && selected.length > 0) {
           const earliest = selected[0]!.version;
           pending = files.filter(f => isPending(f) && (f.version <= earliest || matchesFilter(f.parsed.tags, filter)));
+          logger.info(`Including ancestors up to ${earliest}`);
         } else {
+          // Warn if earlier pending exist but not included
           pending = selected;
+          if (selected.length > 0) {
+            const minSel = selected[0]!.version;
+            const earlierPending = pendingAll.some(f => f.version < minSel);
+            if (earlierPending) {
+              logger.warn("Tag filter excludes earlier pending migrations; use --include-ancestors to include prerequisites.");
+            }
+          }
         }
       }
       const toApply = typeof limit === "number" ? pending.slice(0, Math.max(limit, 0)) : pending;
 
       logger.action(`Applying ${toApply.length} migration(s) (${pending.length} pending out of ${files.length})`);
 
-      for (const migration of toApply) {
-        await this.applyUpWithClient(migration, client);
+      let totalStatements = 0;
+      const totalMigrations = toApply.length;
+      const wallStart = Date.now();
+      for (let idx = 0; idx < toApply.length; idx++) {
+        const migration = toApply[idx]!;
+        if (this.config.verbose) {
+          logger.action(`→ executing m${idx + 1}/${totalMigrations} ${migration.version} (${migration.name})`);
+        }
+        const res = await this.applyUpWithClient(migration, client);
+        totalStatements += res.statements;
+        if (this.config.verbose) {
+          logger.success(`✓ done m${idx + 1}/${totalMigrations} (${res.ms}ms, ${res.statements} stmt${res.statements === 1 ? '' : 's'})`);
+        }
+      }
+      if (this.config.verbose) {
+        const wallMs = Date.now() - wallStart;
+        logger.success(`✓ ${totalMigrations} migration${totalMigrations === 1 ? '' : 's'}, ${totalStatements} statement${totalStatements === 1 ? '' : 's'} in ${wallMs}ms`);
       }
     } catch (error) {
       if (error instanceof LockTimeoutError) {
@@ -723,6 +748,10 @@ export class Migrator {
 
       const limitedApplied = toRollbackApplied.slice(0, Math.max(count, 0));
 
+      let totalStatements = 0;
+      const totalMigrations = limitedApplied.length;
+      const wallStart = Date.now();
+      let idx = 0;
       for (const appliedMig of limitedApplied) {
         const file = fileMap.get(appliedMig.version);
         if (!file) {
@@ -739,8 +768,19 @@ export class Migrator {
             filepath: file.filepath
           });
         }
-
-        await this.applyDownWithClient(file, client);
+        if (this.config.verbose) {
+          logger.action(`→ executing m${idx + 1}/${totalMigrations} ${file.version} (${file.name})`);
+        }
+        const res = await this.applyDownWithClient(file, client);
+        totalStatements += res.statements;
+        if (this.config.verbose) {
+          logger.success(`✓ done m${idx + 1}/${totalMigrations} (${res.ms}ms, ${res.statements} stmt${res.statements === 1 ? '' : 's'})`);
+        }
+        idx++;
+      }
+      if (this.config.verbose) {
+        const wallMs = Date.now() - wallStart;
+        logger.success(`✓ ${totalMigrations} migration${totalMigrations === 1 ? '' : 's'} rolled back, ${totalStatements} statement${totalStatements === 1 ? '' : 's'} in ${wallMs}ms`);
       }
     } catch (error) {
       if (error instanceof LockTimeoutError) {
@@ -962,7 +1002,10 @@ export class Migrator {
   /**
    * Apply a single migration up using provided client
    */
-  private async applyUpWithClient(migration: MigrationFile, client: any): Promise<void> {
+  private async applyUpWithClient(
+    migration: MigrationFile,
+    client: any
+  ): Promise<{ statements: number; ms: number; usedTransaction: boolean }> {
     const table = this.config.table || "nomad_migrations";
     const label = `${migration.version} (${migration.name})`;
 
@@ -978,13 +1021,22 @@ export class Migrator {
 
     const shouldTx = !validation.shouldSkipTransaction;
 
+    const startedAt = Date.now();
     try {
       if (shouldTx) {
         await client.query("BEGIN");
       }
 
-      for (const statement of migration.parsed.up.statements) {
+      const total = migration.parsed.up.statements.length;
+      for (let i = 0; i < total; i++) {
+        const statement = migration.parsed.up.statements[i]!;
+        const start = Date.now();
         await client.query(statement);
+        if (this.config.verbose) {
+          const ms = Date.now() - start;
+          const preview = statement.length > 60 ? statement.slice(0, 57) + "..." : statement;
+          logger.info(`s${i + 1}/${total} (${ms}ms): ${preview}`);
+        }
       }
 
       await client.query(
@@ -999,6 +1051,8 @@ export class Migrator {
         await client.query("COMMIT");
       }
       logger.success(`↑ up ${label}`);
+      const ms = Date.now() - startedAt;
+      return { statements: migration.parsed.up.statements.length, ms, usedTransaction: shouldTx };
     } catch (error) {
       if (shouldTx) await client.query("ROLLBACK");
       throw new SqlError(`Failed UP ${label}: ${(error as Error).message}`);
@@ -1020,7 +1074,10 @@ export class Migrator {
   /**
    * Apply a single migration down using provided client
    */
-  private async applyDownWithClient(migration: MigrationFile, client: any): Promise<void> {
+  private async applyDownWithClient(
+    migration: MigrationFile,
+    client: any
+  ): Promise<{ statements: number; ms: number; usedTransaction: boolean }> {
     const table = this.config.table || "nomad_migrations";
     const label = `${migration.version} (${migration.name})`;
 
@@ -1036,11 +1093,20 @@ export class Migrator {
 
     const shouldTx = !validation.shouldSkipTransaction;
 
+    const startedAt = Date.now();
     try {
       if (shouldTx) await client.query("BEGIN");
 
-      for (const statement of migration.parsed.down.statements) {
+      const total = migration.parsed.down.statements.length;
+      for (let i = 0; i < total; i++) {
+        const statement = migration.parsed.down.statements[i]!;
+        const start = Date.now();
         await client.query(statement);
+        if (this.config.verbose) {
+          const ms = Date.now() - start;
+          const preview = statement.length > 60 ? statement.slice(0, 57) + "..." : statement;
+          logger.info(`s${i + 1}/${total} (${ms}ms): ${preview}`);
+        }
       }
 
       await client.query(
@@ -1052,6 +1118,8 @@ export class Migrator {
 
       if (shouldTx) await client.query("COMMIT");
       logger.info(`↓ down ${label}`);
+      const ms = Date.now() - startedAt;
+      return { statements: migration.parsed.down.statements.length, ms, usedTransaction: shouldTx };
     } catch (error) {
       if (shouldTx) await client.query("ROLLBACK");
       throw new SqlError(`Failed DOWN ${label}: ${(error as Error).message}`);

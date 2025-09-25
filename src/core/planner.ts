@@ -276,6 +276,12 @@ export class Planner {
       lines.push(`Warnings: ${plan.summary.hazardCount} hazardous operation${plan.summary.hazardCount !== 1 ? 's' : ''} detected`);
     }
 
+    if (plan.summary.warnings && plan.summary.warnings.length > 0) {
+      for (const w of plan.summary.warnings) {
+        lines.push(`Note: ${w}`);
+      }
+    }
+
     if (plan.dryRun) {
       lines.push("");
       lines.push("🔍 DRY RUN MODE - No changes will be applied");

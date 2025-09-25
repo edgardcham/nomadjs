@@ -214,6 +214,9 @@ nomad up --tags=seed
 
 # Include earlier pending prerequisites up to first matching tag
 nomad up --tags=users --include-ancestors
+
+# Verbose execution (per-statement timing)
+nomad up --verbose
 ```
 
 ### `nomad down [count]`
