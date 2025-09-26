@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [18, 20, 22, 24]
+        node: [20, 22, 24]
     services:
       postgres:
         image: postgres:18
@@ -55,4 +55,3 @@ jobs:
           DATABASE_URL: postgresql://postgres:nomad@localhost:5432/nomad_test
           NOMAD_TEST_WITH_DB: "true"
         run: npm test
-

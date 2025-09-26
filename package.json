@@ -57,7 +57,7 @@
     "nomad:create": "npm run nomad -- create"
   },
   "engines": {
-    "node": ">=18.18"
+    "node": ">=20"
   },
   "dependencies": {
     "pg": "^8.12.0",
