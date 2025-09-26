@@ -281,6 +281,23 @@ Note: redo always operates on the last applied migration (no specific version se
 - Verifying idempotency of migrations
 - Quickly reapplying a migration after modifications
 
+### `nomad to <version>`
+Migrate forward or backward to match a specific version.
+
+```bash
+# Migrate up to a target version
+nomad to 20250921123045
+
+# Roll back down to a previous version
+nomad to 0   # roll back everything
+```
+
+Behavior:
+- Computes the minimal plan to reach the target (applies or rolls back as needed).
+- Enforces checksums (fails on drift unless `--allow-drift` is set).
+- Acquires the advisory lock for the duration of the operation.
+- Supports tag filtering indirectly via planned files; prefer `nomad plan --to <version>` to preview.
+
 ### `nomad verify`
 Verify checksums of all applied migrations.
 
