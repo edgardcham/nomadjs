@@ -404,15 +404,25 @@ nomad up --events-json
 nomad up --events-json --verbose
 ```
 
-Example events:
+Example events (mix of apply/down/verify):
 
 ```
 {"event":"lock-acquired","ts":"2025-09-24T20:00:00.000Z"}
 {"event":"apply-start","direction":"up","version":"20250923052647","name":"initialize_db","ts":"..."}
 {"event":"stmt-run","direction":"up","version":"20250923052647","ms":5,"preview":"CREATE TABLE users ..."}
 {"event":"apply-end","direction":"up","version":"20250923052647","name":"initialize_db","ms":23,"ts":"..."}
+{"event":"apply-start","direction":"down","version":"20250923052647","name":"initialize_db","ts":"..."}
+{"event":"apply-end","direction":"down","version":"20250923052647","name":"initialize_db","ms":12,"ts":"..."}
+{"event":"verify-start","ts":"..."}
+{"event":"verify-end","valid":true,"driftCount":0,"missingCount":0,"ts":"..."}
 {"event":"lock-released","ts":"..."}
 ```
+
+Event types:
+- `lock-acquired` / `lock-released` track advisory locking across `up`, `down`, `to`, and `redo`.
+- `apply-start` / `apply-end` fire for every migration with `direction` (`up` or `down`) and include duration (`ms`) on completion.
+- `stmt-run` reports each SQL statement with execution time and a truncated preview.
+- `verify-start` / `verify-end` wrap `nomad verify` runs; `verify-end` includes drift and missing counts.
 
 Notes:
 - Events are emitted to stdout as one JSON object per line (NDJSON).

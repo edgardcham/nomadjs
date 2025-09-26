@@ -58,7 +58,10 @@ describe("Migrator.redo()", () => {
 
     // Mock hazard detection
     vi.mocked(detectHazards).mockReturnValue([]);
-    vi.mocked(validateHazards).mockReturnValue({ valid: true, errors: [] });
+    vi.mocked(validateHazards).mockImplementation((hazards, hasNotx) => ({
+      shouldSkipTransaction: Boolean(hasNotx),
+      hazardsDetected: hazards || []
+    }) as any);
 
     // Mock filenameToVersion to extract version from filepath
     vi.mocked(filenameToVersion).mockImplementation((filepath: string) => {
@@ -128,7 +131,7 @@ DROP TABLE users;`;
       // Verify version tracking updates
       expect(mockClient.query).toHaveBeenCalledWith(
         expect.stringContaining("UPDATE"),
-        expect.arrayContaining([20240101120000n])
+        expect.arrayContaining(["20240101120000"])
       );
     });
 
@@ -529,7 +532,7 @@ DROP TABLE users;`;
       // Should handle gracefully with no SQL executed - only updates to the migration table
       expect(mockClient.query).toHaveBeenCalledWith(
         expect.stringContaining("UPDATE"),
-        expect.arrayContaining([20240101120000n])
+        expect.arrayContaining(["20240101120000"])
       );
       // No actual migration SQL statements or transactions executed (since statements are empty)
       expect(mockClient.query).not.toHaveBeenCalledWith("BEGIN");

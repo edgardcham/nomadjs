@@ -313,6 +313,7 @@ export class Migrator {
    */
   async verify(): Promise<VerifyResult> {
     await this.ensureTable();
+    emitEvent(this.config.eventsJson, { event: "verify-start", ts: new Date().toISOString() });
 
     const files = await this.loadMigrationFiles();
     const applied = await this.getAppliedMigrations();
@@ -340,13 +341,23 @@ export class Migrator {
       }
     }
 
-    return {
+    const result: VerifyResult = {
       valid: driftedMigrations.length === 0 && missingMigrations.length === 0,
       driftCount: driftedMigrations.length,
       missingCount: missingMigrations.length,
       driftedMigrations,
       missingMigrations
     };
+
+    emitEvent(this.config.eventsJson, {
+      event: "verify-end",
+      ts: new Date().toISOString(),
+      valid: result.valid,
+      driftCount: result.driftCount,
+      missingCount: result.missingCount
+    });
+
+    return result;
   }
 
   /**
@@ -523,7 +534,6 @@ export class Migrator {
         maxRetryDelay: 5000
       });
       emitEvent(this.config.eventsJson, { event: "lock-acquired", ts: new Date().toISOString() });
-      emitEvent(this.config.eventsJson, { event: "lock-acquired", ts: new Date().toISOString() });
 
       await this.ensureTable();
 
@@ -574,14 +584,18 @@ export class Migrator {
         for (const pm of plan.migrations) {
           const mf = fileMap.get(pm.version.toString());
           if (!mf) continue; // Shouldn't happen
-          await this.applyUpWithClient(mf, client);
+          emitEvent(this.config.eventsJson, { event: "apply-start", direction: "up", version: String(mf.version), name: mf.name, ts: new Date().toISOString() });
+          const res = await this.applyUpWithClient(mf, client);
+          emitEvent(this.config.eventsJson, { event: "apply-end", direction: "up", version: String(mf.version), name: mf.name, ms: res.ms, ts: new Date().toISOString() });
         }
       } else {
         logger.action(`Rolling back ${plan.migrations.length} migration(s) to reach ${targetVersion}`);
         for (const pm of plan.migrations) {
           const mf = fileMap.get(pm.version.toString());
           if (!mf) continue; // Pre-check above should catch missing files
-          await this.applyDownWithClient(mf, client);
+          emitEvent(this.config.eventsJson, { event: "apply-start", direction: "down", version: String(mf.version), name: mf.name, ts: new Date().toISOString() });
+          const res = await this.applyDownWithClient(mf, client);
+          emitEvent(this.config.eventsJson, { event: "apply-end", direction: "down", version: String(mf.version), name: mf.name, ms: res.ms, ts: new Date().toISOString() });
         }
       }
 
@@ -630,6 +644,7 @@ export class Migrator {
         retryDelay: 100,
         maxRetryDelay: 5000
       });
+      emitEvent(this.config.eventsJson, { event: "lock-acquired", ts: new Date().toISOString() });
 
       // Now proceed with migrations
       await this.ensureTable();
@@ -783,7 +798,9 @@ export class Migrator {
         if (this.config.verbose) {
           logger.action(`→ executing m${idx + 1}/${totalMigrations} ${file.version} (${file.name})`);
         }
+        emitEvent(this.config.eventsJson, { event: "apply-start", direction: "down", version: String(file.version), name: file.name, ts: new Date().toISOString() });
         const res = await this.applyDownWithClient(file, client);
+        emitEvent(this.config.eventsJson, { event: "apply-end", direction: "down", version: String(file.version), name: file.name, ms: res.ms, ts: new Date().toISOString() });
         totalStatements += res.statements;
         if (this.config.verbose) {
           logger.success(`✓ done m${idx + 1}/${totalMigrations} (${res.ms}ms, ${res.statements} stmt${res.statements === 1 ? '' : 's'})`);
@@ -867,16 +884,17 @@ export class Migrator {
         retryDelay: 100,
         maxRetryDelay: 5000
       });
+      emitEvent(this.config.eventsJson, { event: "lock-acquired", ts: new Date().toISOString() });
 
       logger.action(`Rolling back ${targetMigration.version} (${targetMigration.name})`);
-
-      // Execute down migration
-      await this.executeDown(file, client);
+      emitEvent(this.config.eventsJson, { event: "apply-start", direction: "down", version: String(file.version), name: file.name, ts: new Date().toISOString() });
+      const downRes = await this.applyDownWithClient(file, client);
+      emitEvent(this.config.eventsJson, { event: "apply-end", direction: "down", version: String(file.version), name: file.name, ms: downRes.ms, ts: new Date().toISOString() });
 
       logger.action(`Reapplying ${targetMigration.version} (${targetMigration.name})`);
-
-      // Execute up migration
-      await this.executeUp(file, client);
+      emitEvent(this.config.eventsJson, { event: "apply-start", direction: "up", version: String(file.version), name: file.name, ts: new Date().toISOString() });
+      const upRes = await this.applyUpWithClient(file, client);
+      emitEvent(this.config.eventsJson, { event: "apply-end", direction: "up", version: String(file.version), name: file.name, ms: upRes.ms, ts: new Date().toISOString() });
 
       logger.success(`Redo complete: ${targetMigration.version} (${targetMigration.name})`);
     } catch (error) {
@@ -889,6 +907,7 @@ export class Migrator {
       if (cleanup) {
         await cleanup();
         cleanup = undefined;
+        emitEvent(this.config.eventsJson, { event: "lock-released", ts: new Date().toISOString() });
       }
       client.release();
     }
@@ -1049,14 +1068,27 @@ export class Migrator {
     });
 
     const shouldTx = !validation.shouldSkipTransaction;
-
+    const total = migration.parsed.up.statements.length;
     const startedAt = Date.now();
+
+    if (total === 0) {
+      await client.query(
+        `INSERT INTO ${table} (version, name, checksum, applied_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (version) DO UPDATE
+         SET applied_at = NOW(), rolled_back_at = NULL`,
+        [migration.version.toString(), migration.name, migration.checksum]
+      );
+      logger.success(`↑ up ${label}`);
+      const ms = Date.now() - startedAt;
+      return { statements: 0, ms, usedTransaction: false };
+    }
+
     try {
       if (shouldTx) {
         await client.query("BEGIN");
       }
 
-      const total = migration.parsed.up.statements.length;
       for (let i = 0; i < total; i++) {
         const statement = migration.parsed.up.statements[i]!;
         const start = Date.now();
@@ -1129,12 +1161,24 @@ export class Migrator {
     });
 
     const shouldTx = !validation.shouldSkipTransaction;
-
+    const total = migration.parsed.down.statements.length;
     const startedAt = Date.now();
+
+    if (total === 0) {
+      await client.query(
+        `UPDATE ${table}
+         SET rolled_back_at = NOW()
+         WHERE version = $1`,
+        [migration.version.toString()]
+      );
+      logger.info(`↓ down ${label}`);
+      const ms = Date.now() - startedAt;
+      return { statements: 0, ms, usedTransaction: false };
+    }
+
     try {
       if (shouldTx) await client.query("BEGIN");
 
-      const total = migration.parsed.down.statements.length;
       for (let i = 0; i < total; i++) {
         const statement = migration.parsed.down.statements[i]!;
         const start = Date.now();

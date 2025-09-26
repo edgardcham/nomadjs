@@ -241,6 +241,12 @@ nomad up --verbose
 nomad up --events-json
 ```
 
+When `--events-json` is enabled Nomad emits newline-delimited events:
+- `lock-acquired` / `lock-released` mark advisory lock lifecycle across `up`, `down`, `to`, and `redo`.
+- `apply-start` / `apply-end` surround each migration with `direction` (`up` or `down`) and include the run time (`ms`) on completion.
+- `stmt-run` reports per-statement execution timing with a truncated SQL preview.
+- `verify-start` / `verify-end` wrap `nomad verify`, with the end event summarising drift and missing counts.
+
 ### `nomad down [count]`
 Rollback applied migrations.
 
@@ -280,6 +286,9 @@ Verify checksums of all applied migrations.
 
 ```bash
 nomad verify
+
+# Emit NDJSON summary while verifying
+nomad verify --events-json
 
 # Output:
 # ✓ All migration checksums valid
