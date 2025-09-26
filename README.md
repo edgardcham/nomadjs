@@ -1,7 +1,7 @@
 # NomadJS
 
 [![CI](https://github.com/edgardcham/nomadjs/actions/workflows/ci.yml/badge.svg)](https://github.com/edgardcham/nomadjs/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/nomadjs.svg)](https://www.npmjs.com/package/nomadjs)
+[![npm](https://img.shields.io/npm/v/%40loopfox%2Fnomad.svg)](https://www.npmjs.com/package/@loopfox/nomad)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Production-ready SQL migration tool for Node.js with checksums, transaction control, and advanced PostgreSQL support.
@@ -26,7 +26,7 @@ Production-ready SQL migration tool for Node.js with checksums, transaction cont
 After publish (recommended for most users):
 
 ```bash
-npm install -g nomadjs
+npm install -g @loopfox/nomad
 nomad --help
 ```
 

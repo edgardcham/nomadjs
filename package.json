@@ -1,6 +1,6 @@
 {
-  "name": "nomadjs",
-  "version": "0.1.0",
+  "name": "@loopfox/nomad",
+  "version": "1.1.0",
   "description": "Nomad-style SQL migrations for Node.js",
   "type": "module",
   "repository": {
@@ -11,6 +11,18 @@
   "bugs": {
     "url": "https://github.com/edgardcham/nomadjs/issues"
   },
+  "keywords": [
+    "migrations",
+    "migration",
+    "sql",
+    "postgres",
+    "postgresql",
+    "cli",
+    "database",
+    "schema",
+    "devops",
+    "db-migrate"
+  ],
   "bin": {
     "nomad": "./bin/nomad"
   },
