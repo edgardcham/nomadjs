@@ -297,4 +297,46 @@ DELETE FROM users WHERE id = 1;`;
       expect.objectContaining({ line: 6, column: 1 })
     ]);
   });
+
+  it("ignores leading comments when mapping statement positions", () => {
+    const sql = `-- +nomad Up
+-- This comment references UPDATE foo SET bar = 'baz';
+UPDATE foo SET bar = 'baz';
+UPDATE foo SET bar = 'baz';
+-- +nomad Down
+-- Another comment with UPDATE foo SET bar = 'baz';
+UPDATE foo SET bar = 'baz';`;
+
+    const result = parseNomadSql(sql, "test.sql");
+
+    expect(result.up.statementMeta).toEqual([
+      expect.objectContaining({ line: 3, column: 1 }),
+      expect.objectContaining({ line: 4, column: 1 })
+    ]);
+
+    expect(result.down.statementMeta).toEqual([
+      expect.objectContaining({ line: 7, column: 1 })
+    ]);
+  });
+
+  it("preserves metadata for block statements with CRLF line endings", () => {
+    const sql = `-- +nomad Up\r
+-- +nomad block\r
+  INSERT INTO things VALUES (1);\r
+  INSERT INTO things VALUES (2);\r
+\\.\r
+-- +nomad endblock\r
+-- +nomad Down\r
+DELETE FROM things;\r\n`;
+
+    const result = parseNomadSql(sql, "test.sql");
+
+    expect(result.up.statements).toHaveLength(1);
+    expect(result.up.statementMeta).toEqual([
+      expect.objectContaining({ line: 3, column: 3 })
+    ]);
+    expect(result.down.statementMeta).toEqual([
+      expect.objectContaining({ line: 8, column: 1 })
+    ]);
+  });
 });

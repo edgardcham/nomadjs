@@ -267,6 +267,62 @@ export function splitSqlStatements(sql: string): string[] {
   return statements;
 }
 
+function isWhitespaceChar(ch: string | undefined): boolean {
+  return ch === " " || ch === "\t" || ch === "\r" || ch === "\n";
+}
+
+function leadingNoiseOffset(statement: string): number {
+  let i = 0;
+  const len = statement.length;
+  while (i < len) {
+    const ch = statement[i];
+    if (isWhitespaceChar(ch)) {
+      i++;
+      continue;
+    }
+    if (ch === "-" && statement[i + 1] === "-") {
+      const newline = statement.indexOf("\n", i + 2);
+      if (newline === -1) {
+        return len;
+      }
+      i = newline + 1;
+      continue;
+    }
+    if (ch === "/" && statement[i + 1] === "*") {
+      const end = statement.indexOf("*/", i + 2);
+      if (end === -1) {
+        return len;
+      }
+      i = end + 2;
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+
+function isInsideComment(section: string, index: number): boolean {
+  if (index < 0 || index >= section.length) return false;
+
+  const lastBlockOpen = section.lastIndexOf("/*", index);
+  if (lastBlockOpen !== -1) {
+    const lastBlockClose = section.lastIndexOf("*/", index);
+    if (lastBlockClose === -1 || lastBlockClose < lastBlockOpen) {
+      return true;
+    }
+  }
+
+  const lastLineComment = section.lastIndexOf("--", index);
+  if (lastLineComment !== -1) {
+    const newlineAfter = section.indexOf("\n", lastLineComment);
+    if (newlineAfter === -1 || newlineAfter > index) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function computeSectionMetadata(
   content: string,
   statements: string[],
@@ -276,27 +332,57 @@ function computeSectionMetadata(
 ): StatementMeta[] {
   const metas: StatementMeta[] = [];
   const contentLength = content.length;
-  let searchStart = Math.max(0, Math.min(startIndex, contentLength));
-  const searchLimit = Math.max(0, Math.min(endIndex, contentLength));
+  const sectionStart = Math.max(0, Math.min(startIndex, contentLength));
+  const sectionEnd = Math.max(sectionStart, Math.min(endIndex, contentLength));
+  const section = content.slice(sectionStart, sectionEnd);
+  const sectionLength = section.length;
+  let cursor = 0;
 
   for (const statement of statements) {
     let matchIndex = -1;
+
     if (statement.length > 0) {
-      matchIndex = content.indexOf(statement, searchStart);
-      if (matchIndex >= 0 && matchIndex >= searchLimit) {
-        matchIndex = -1;
+      let searchPos = cursor;
+      const maxSearch = Math.max(0, sectionLength - statement.length);
+      while (searchPos <= maxSearch) {
+        const idx = section.indexOf(statement, searchPos);
+        if (idx === -1) {
+          break;
+        }
+        if (isInsideComment(section, idx)) {
+          searchPos = idx + 1;
+          continue;
+        }
+        matchIndex = idx;
+        break;
       }
     }
 
     if (matchIndex >= 0) {
-      const { line, column } = toLineColumn(lineOffsets, matchIndex);
+      const noiseOffset = leadingNoiseOffset(statement);
+      const meaningfulOffset = noiseOffset >= statement.length ? 0 : noiseOffset;
+      const absoluteIndex = Math.min(
+        contentLength - 1,
+        sectionStart + matchIndex + meaningfulOffset
+      );
+      const { line, column } = toLineColumn(lineOffsets, absoluteIndex);
       metas.push({ sql: statement, line, column });
-      searchStart = matchIndex + statement.length;
+      cursor = Math.min(sectionLength, matchIndex + statement.length);
     } else {
-      const fallbackIndex = Math.min(contentLength > 0 ? contentLength - 1 : 0, searchStart);
-      const { line, column } = contentLength === 0 ? { line: 1, column: 1 } : toLineColumn(lineOffsets, fallbackIndex);
+      const fallbackRelative = Math.min(sectionLength, cursor);
+      const fallbackAbsolute = Math.min(
+        contentLength > 0 ? contentLength - 1 : 0,
+        sectionStart + fallbackRelative
+      );
+      const { line, column } = contentLength === 0
+        ? { line: 1, column: 1 }
+        : toLineColumn(lineOffsets, fallbackAbsolute);
       metas.push({ sql: statement, line, column });
-      searchStart = Math.min(contentLength, searchStart + statement.length);
+      cursor = Math.min(sectionLength, cursor + statement.length);
+    }
+
+    while (cursor < sectionLength && isWhitespaceChar(section[cursor])) {
+      cursor++;
     }
   }
 
