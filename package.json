@@ -1,6 +1,6 @@
 {
   "name": "@loopfox/nomad",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Nomad-style SQL migrations for Node.js",
   "type": "module",
   "repository": {
