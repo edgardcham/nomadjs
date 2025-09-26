@@ -114,8 +114,19 @@ export class Migrator {
           const lastSize = this.cacheLastSize.get(filepath);
 
           if (lastModified === mtime && lastSize === stats.size) {
-            // Return cached version
-            return cached;
+            if (process.env.NOMAD_CACHE_HASH_GUARD === 'true') {
+              const content = readFileSync(filepath, "utf8");
+              const checksum = calculateChecksum(content);
+              if (checksum !== cached.checksum) {
+                this.migrationFileCache.delete(filepath);
+                this.cacheLastModified.delete(filepath);
+                this.cacheLastSize.delete(filepath);
+              } else {
+                return cached;
+              }
+            } else {
+              return cached;
+            }
           }
         } catch {
           // File stats not available, proceed without cache

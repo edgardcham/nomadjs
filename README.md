@@ -2,8 +2,6 @@
 
 Production-ready SQL migration tool for Node.js with checksums, transaction control, and advanced PostgreSQL support.
 
-**v1.1 Production Ready (Grade: A+)** - All P0 features complete with 300+ tests passing (100% success rate).
-
 **Key Features:**
 - 🔒 SHA-256 checksums for drift detection
 - 🎯 Automatic transaction wrapping with hazard detection
@@ -448,3 +446,8 @@ npm publish
 ```
 
 The package exposes both ESM (`dist/esm`) and CJS (`dist/cjs`) entry points and registers the `nomad` CLI via `bin/nomad`.
+
+## Troubleshooting
+### Migration cache misses
+
+Nomad caches parsed migrations using the file's mtime and size. On some networked filesystems or editors with unusual timestamp behavior, quick edits may not update those attributes. If you suspect stale parses, set `NOMAD_CACHE_HASH_GUARD=true` to add a checksum comparison at the cost of re-reading files once per command.

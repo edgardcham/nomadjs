@@ -92,7 +92,7 @@ describeIfDb("CLI: nomad redo command", () => {
       expect(output).not.toContain("[migrationVersion]");
     });
 
-    it.skip("should redo the last migration", async () => {
+    it("should redo the last migration", async () => {
       // Create a migration
       const migrationFile = join(testDir, "20240101120000_test.sql");
       writeFileSync(migrationFile, `-- +nomad up
