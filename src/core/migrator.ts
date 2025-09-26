@@ -62,6 +62,7 @@ export class Migrator {
   private config: Config;
   private migrationFileCache: Map<string, MigrationFile> = new Map();
   private cacheLastModified: Map<string, number> = new Map();
+  private cacheLastSize: Map<string, number> = new Map();
 
   constructor(config: Config, pool: Pool) {
     this.config = config;
@@ -110,8 +111,9 @@ export class Migrator {
           const stats = statSync(filepath);
           const mtime = stats.mtimeMs;
           const lastModified = this.cacheLastModified.get(filepath);
+          const lastSize = this.cacheLastSize.get(filepath);
 
-          if (lastModified === mtime) {
+          if (lastModified === mtime && lastSize === stats.size) {
             // Return cached version
             return cached;
           }
@@ -143,6 +145,7 @@ export class Migrator {
         try {
           const stats = statSync(filepath);
           this.cacheLastModified.set(filepath, stats.mtimeMs);
+          this.cacheLastSize.set(filepath, stats.size);
         } catch {
           // Can't get file stats, skip cache update
         }
@@ -158,6 +161,7 @@ export class Migrator {
   clearCache(): void {
     this.migrationFileCache.clear();
     this.cacheLastModified.clear();
+    this.cacheLastSize.clear();
   }
 
   /**
@@ -926,8 +930,13 @@ export class Migrator {
       }
 
       // Execute each down statement
-      for (const statement of downStatements) {
-        await client.query(statement);
+      for (let i = 0; i < downStatements.length; i++) {
+        const statement = downStatements[i]!;
+        try {
+          await client.query(statement);
+        } catch (error) {
+          throw this.createSqlError("down", migration, statement, i, error);
+        }
       }
 
       // Update migration record
@@ -942,6 +951,9 @@ export class Migrator {
     } catch (error) {
       if (useTransaction) {
         await client.query("ROLLBACK");
+      }
+      if (error instanceof SqlError) {
+        throw error;
       }
       throw new SqlError(`Down migration failed for ${migration.version}: ${(error as Error).message}`);
     }
@@ -983,8 +995,13 @@ export class Migrator {
       }
 
       // Execute each up statement
-      for (const statement of upStatements) {
-        await client.query(statement);
+      for (let i = 0; i < upStatements.length; i++) {
+        const statement = upStatements[i]!;
+        try {
+          await client.query(statement);
+        } catch (error) {
+          throw this.createSqlError("up", migration, statement, i, error);
+        }
       }
 
       // Update migration record
@@ -1003,6 +1020,9 @@ export class Migrator {
     } catch (error) {
       if (useTransaction) {
         await client.query("ROLLBACK");
+      }
+      if (error instanceof SqlError) {
+        throw error;
       }
       throw new SqlError(`Up migration failed for ${migration.version}: ${(error as Error).message}`);
     }
@@ -1040,7 +1060,11 @@ export class Migrator {
       for (let i = 0; i < total; i++) {
         const statement = migration.parsed.up.statements[i]!;
         const start = Date.now();
-        await client.query(statement);
+        try {
+          await client.query(statement);
+        } catch (error) {
+          throw this.createSqlError("up", migration, statement, i, error);
+        }
         const ms = Date.now() - start;
         const preview = statement.length > 60 ? statement.slice(0, 57) + "..." : statement;
         if (this.config.verbose) {
@@ -1065,6 +1089,9 @@ export class Migrator {
       return { statements: migration.parsed.up.statements.length, ms, usedTransaction: shouldTx };
     } catch (error) {
       if (shouldTx) await client.query("ROLLBACK");
+      if (error instanceof SqlError) {
+        throw error;
+      }
       throw new SqlError(`Failed UP ${label}: ${(error as Error).message}`);
     }
   }
@@ -1111,7 +1138,11 @@ export class Migrator {
       for (let i = 0; i < total; i++) {
         const statement = migration.parsed.down.statements[i]!;
         const start = Date.now();
-        await client.query(statement);
+        try {
+          await client.query(statement);
+        } catch (error) {
+          throw this.createSqlError("down", migration, statement, i, error);
+        }
         const ms = Date.now() - start;
         const preview = statement.length > 60 ? statement.slice(0, 57) + "..." : statement;
         if (this.config.verbose) {
@@ -1133,6 +1164,9 @@ export class Migrator {
       return { statements: migration.parsed.down.statements.length, ms, usedTransaction: shouldTx };
     } catch (error) {
       if (shouldTx) await client.query("ROLLBACK");
+      if (error instanceof SqlError) {
+        throw error;
+      }
       throw new SqlError(`Failed DOWN ${label}: ${(error as Error).message}`);
     }
   }
@@ -1147,5 +1181,78 @@ export class Migrator {
     } finally {
       client.release();
     }
+  }
+
+  private createSqlError(
+    direction: "up" | "down",
+    migration: MigrationFile,
+    statement: string,
+    index: number,
+    error: any
+  ): SqlError {
+    const metaSource = direction === "up"
+      ? migration.parsed.up.statementMeta
+      : migration.parsed.down.statementMeta;
+    const meta = metaSource?.[index];
+    const location = this.resolveErrorLocation(meta, statement, error);
+    const label = `${migration.version} (${migration.name})`;
+    const prefix = direction === "up" ? "Failed UP" : "Failed DOWN";
+
+    return new SqlError(`${prefix} ${label}: ${(error as Error).message}`, {
+      sql: statement,
+      file: migration.filepath,
+      line: location.line,
+      column: location.column
+    });
+  }
+
+  private resolveErrorLocation(
+    meta: { line: number; column: number } | undefined,
+    statement: string,
+    error: any
+  ): { line?: number; column?: number } {
+    const rawPosition = (error && typeof error.position !== "undefined") ? error.position : undefined;
+    const parsedPosition = typeof rawPosition === "string"
+      ? parseInt(rawPosition, 10)
+      : typeof rawPosition === "number"
+        ? rawPosition
+        : NaN;
+
+    const hasMeta = Boolean(meta);
+    let line = meta?.line;
+    let column = meta?.column;
+
+    if (!Number.isNaN(parsedPosition) && parsedPosition > 0) {
+      const relative = this.computeRelativeLocation(statement, parsedPosition);
+      if (hasMeta && meta) {
+        line = meta.line + (relative.line - 1);
+        column = relative.line === 1
+          ? meta.column + (relative.column - 1)
+          : relative.column;
+      } else {
+        line = relative.line;
+        column = relative.column;
+      }
+    }
+
+    return { line, column };
+  }
+
+  private computeRelativeLocation(statement: string, position: number): { line: number; column: number } {
+    const clamped = Math.max(1, Math.min(Math.floor(position), statement.length));
+    let line = 1;
+    let column = 1;
+
+    for (let i = 0; i < clamped - 1; i++) {
+      const ch = statement[i];
+      if (ch === "\n") {
+        line++;
+        column = 1;
+      } else {
+        column++;
+      }
+    }
+
+    return { line, column };
   }
 }

@@ -16,6 +16,7 @@ Production-ready SQL migration tool for Node.js with checksums, transaction cont
 - 🚀 Standardized exit codes for CI/CD integration
 - 🔐 Advisory locking prevents concurrent migrations
 - 📊 JSON output for automation and monitoring
+- 📍 File:line:column error reporting for instant debugging
 - 🌈 Color-aware CLI output respecting `NO_COLOR`/`NOMAD_NO_COLOR`
 
 ## Installation & Linking
@@ -416,6 +417,16 @@ Example events:
 Notes:
 - Events are emitted to stdout as one JSON object per line (NDJSON).
 - Human logs (including `--verbose`) remain colorized and readable.
+
+## Error Reporting
+
+Nomad pinpoints failing SQL with `path:line:column` context so you can jump straight to the offending statement. Example:
+
+```
+migrations/20240101120000_create_users.sql:42:5 - Failed UP 20240101120000 (create_users): syntax error at or near "FROM"
+```
+
+Both parser errors and PostgreSQL execution errors include location details when available.
 
 ## Publishing Notes
 

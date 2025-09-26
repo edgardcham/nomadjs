@@ -277,4 +277,24 @@ describe("parseNomadSql with blocks", () => {
     expect(result.up.statements[2]).toContain("INSERT INTO settings");
     expect(result.down.statements).toHaveLength(3);
   });
+
+  it("records statement metadata with line and column information", () => {
+    const sql = `-- +nomad Up
+SELECT 1;
+
+INSERT INTO users VALUES (1);
+-- +nomad Down
+DELETE FROM users WHERE id = 1;`;
+
+    const result = parseNomadSql(sql, "migrations/20240101120000_test.sql");
+
+    expect(result.up.statementMeta).toEqual([
+      expect.objectContaining({ line: 2, column: 1 }),
+      expect.objectContaining({ line: 4, column: 1 })
+    ]);
+
+    expect(result.down.statementMeta).toEqual([
+      expect.objectContaining({ line: 6, column: 1 })
+    ]);
+  });
 });

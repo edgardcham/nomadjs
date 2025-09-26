@@ -28,9 +28,25 @@ export class NomadError extends Error {
 /**
  * SQL execution error
  */
+export interface SqlErrorDetails {
+  sql?: string;
+  file?: string;
+  line?: number;
+  column?: number;
+}
+
 export class SqlError extends NomadError {
-  constructor(message: string, public readonly sql?: string) {
+  public readonly sql?: string;
+  public readonly file?: string;
+  public readonly line?: number;
+  public readonly column?: number;
+
+  constructor(message: string, details: SqlErrorDetails = {}) {
     super(message, ExitCode.SQL_ERROR);
+    this.sql = details.sql;
+    this.file = details.file;
+    this.line = details.line;
+    this.column = details.column;
   }
 }
 

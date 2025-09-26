@@ -519,6 +519,12 @@ services:
 
 ## Troubleshooting
 
+Nomad prepends CLI errors with `file:line:column` so you can locate failing statements instantly. Example:
+
+```
+migrations/20240101120000_create_users.sql:42:5 - Failed UP 20240101120000 (create_users): syntax error at or near "FROM"
+```
+
 ### Checksum Mismatch Error
 
 ```bash

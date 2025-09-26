@@ -59,8 +59,15 @@ describe("Events JSON", () => {
     ]);
     readFileMock.mockReturnValue("CREATE TABLE t(id int); INSERT INTO t VALUES (1);");
     parseFileMock.mockReturnValue({
-      up: { statements: ["CREATE TABLE t(id int);", "INSERT INTO t VALUES (1);"] , notx: false },
-      down: { statements: [], notx: false },
+      up: {
+        statements: ["CREATE TABLE t(id int);", "INSERT INTO t VALUES (1);"] ,
+        statementMeta: [
+          { sql: "CREATE TABLE t(id int);", line: 1, column: 1 },
+          { sql: "INSERT INTO t VALUES (1);", line: 1, column: 1 }
+        ],
+        notx: false
+      },
+      down: { statements: [], statementMeta: [], notx: false },
       noTransaction: false,
       tags: ["test"]
     });

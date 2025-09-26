@@ -29,7 +29,7 @@ describe("Exit Codes", () => {
 
   describe("Error classes", () => {
     it("should create SqlError with correct exit code", () => {
-      const error = new SqlError("SELECT failed", "SELECT * FROM users");
+      const error = new SqlError("SELECT failed", { sql: "SELECT * FROM users" });
       expect(error).toBeInstanceOf(NomadError);
       expect(error.exitCode).toBe(ExitCode.SQL_ERROR);
       expect(error.message).toBe("SELECT failed");

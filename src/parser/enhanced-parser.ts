@@ -1,5 +1,11 @@
 import { readFileSync } from "node:fs";
 
+export interface StatementMeta {
+  sql: string;
+  line: number;
+  column: number;
+}
+
 /**
  * Normalize line endings and remove BOM
  */
@@ -10,6 +16,46 @@ function normalizeContent(content: string): string {
   }
   // Normalize CRLF to LF
   return content.replace(/\r\n/g, "\n");
+}
+
+function buildLineOffsets(lines: string[]): number[] {
+  const offsets: number[] = [];
+  let running = 0;
+  for (let i = 0; i < lines.length; i++) {
+    offsets.push(running);
+    running += lines[i]?.length ?? 0;
+    if (i < lines.length - 1) {
+      running += 1; // account for newline removed by split
+    }
+  }
+  return offsets;
+}
+
+function findLineIndex(lineOffsets: number[], index: number): number {
+  let low = 0;
+  let high = lineOffsets.length - 1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const midOffset = lineOffsets[mid] ?? 0;
+    const nextOffset = lineOffsets[mid + 1] ?? Number.POSITIVE_INFINITY;
+    if (index < midOffset) {
+      high = mid - 1;
+    } else if (index >= nextOffset) {
+      low = mid + 1;
+    } else {
+      return mid;
+    }
+  }
+  return Math.max(0, Math.min(lineOffsets.length - 1, low));
+}
+
+function toLineColumn(lineOffsets: number[], index: number): { line: number; column: number } {
+  const lineIdx = findLineIndex(lineOffsets, index);
+  const lineStart = lineOffsets[lineIdx] ?? 0;
+  return {
+    line: lineIdx + 1,
+    column: index - lineStart + 1
+  };
 }
 
 /**
@@ -221,13 +267,51 @@ export function splitSqlStatements(sql: string): string[] {
   return statements;
 }
 
+function computeSectionMetadata(
+  content: string,
+  statements: string[],
+  startIndex: number,
+  endIndex: number,
+  lineOffsets: number[]
+): StatementMeta[] {
+  const metas: StatementMeta[] = [];
+  const contentLength = content.length;
+  let searchStart = Math.max(0, Math.min(startIndex, contentLength));
+  const searchLimit = Math.max(0, Math.min(endIndex, contentLength));
+
+  for (const statement of statements) {
+    let matchIndex = -1;
+    if (statement.length > 0) {
+      matchIndex = content.indexOf(statement, searchStart);
+      if (matchIndex >= 0 && matchIndex >= searchLimit) {
+        matchIndex = -1;
+      }
+    }
+
+    if (matchIndex >= 0) {
+      const { line, column } = toLineColumn(lineOffsets, matchIndex);
+      metas.push({ sql: statement, line, column });
+      searchStart = matchIndex + statement.length;
+    } else {
+      const fallbackIndex = Math.min(contentLength > 0 ? contentLength - 1 : 0, searchStart);
+      const { line, column } = contentLength === 0 ? { line: 1, column: 1 } : toLineColumn(lineOffsets, fallbackIndex);
+      metas.push({ sql: statement, line, column });
+      searchStart = Math.min(contentLength, searchStart + statement.length);
+    }
+  }
+
+  return metas;
+}
+
 export interface ParsedMigration {
   up: {
     statements: string[];
+    statementMeta: StatementMeta[];
     notx: boolean;
   };
   down: {
     statements: string[];
+    statementMeta: StatementMeta[];
     notx: boolean;
   };
   noTransaction: boolean; // Legacy support
@@ -246,19 +330,23 @@ export function parseNomadSql(content: string, filename: string): ParsedMigratio
   content = normalizeContent(content);
 
   const result: ParsedMigration = {
-    up: { statements: [], notx: false },
-    down: { statements: [], notx: false },
+    up: { statements: [], statementMeta: [], notx: false },
+    down: { statements: [], statementMeta: [], notx: false },
     noTransaction: false,
     tags: undefined
   };
 
   // Extract directives
   const lines = content.split("\n");
+  const lineOffsets = buildLineOffsets(lines);
   let inUp = false;
   let inDown = false;
   let blockDepth = 0;
   let blockContent = "";
   let currentSection: string[] = [];
+  let upSearchStart = 0;
+  let downSearchStart = -1;
+  let downDirectiveOffset = content.length;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -273,6 +361,8 @@ export function parseNomadSql(content: string, filename: string): ParsedMigratio
         inUp = true;
         inDown = false;
         currentSection = [];
+        const nextStart = (lineOffsets[i] ?? 0) + lines[i]!.length + 1;
+        upSearchStart = Math.min(content.length, Math.max(0, nextStart));
       } else if (directive === "down") {
         if (inUp && currentSection.length > 0) {
           // Save up section
@@ -283,6 +373,9 @@ export function parseNomadSql(content: string, filename: string): ParsedMigratio
         inUp = false;
         inDown = true;
         currentSection = [];
+        downDirectiveOffset = Math.min(downDirectiveOffset, lineOffsets[i] ?? content.length);
+        const nextStart = (lineOffsets[i] ?? 0) + lines[i]!.length + 1;
+        downSearchStart = Math.min(content.length, Math.max(0, nextStart));
       } else if (directive === "notx" || directive === "no transaction") {
         // Set notx for the current section
         if (inUp) {
@@ -368,6 +461,24 @@ export function parseNomadSql(content: string, filename: string): ParsedMigratio
       result.down.statements.push(blockContent.trim());
     }
   }
+
+  const upEnd = Math.max(0, Math.min(downDirectiveOffset, content.length));
+  result.up.statementMeta = computeSectionMetadata(
+    content,
+    result.up.statements,
+    upSearchStart,
+    upEnd,
+    lineOffsets
+  );
+
+  const downStart = downSearchStart >= 0 ? downSearchStart : downDirectiveOffset;
+  result.down.statementMeta = computeSectionMetadata(
+    content,
+    result.down.statements,
+    Math.max(0, downStart),
+    content.length,
+    lineOffsets
+  );
 
   return result;
 }

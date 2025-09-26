@@ -90,18 +90,42 @@ describe("Plan Command", () => {
 
       parseNomadSqlFileMock
         .mockReturnValueOnce({
-          up: { statements: [content1], notx: false },
-          down: { statements: ["DROP TABLE users;"], notx: false },
+          up: {
+            statements: [content1],
+            statementMeta: [{ sql: content1, line: 1, column: 1 }],
+            notx: false
+          },
+          down: {
+            statements: ["DROP TABLE users;"],
+            statementMeta: [{ sql: "DROP TABLE users;", line: 1, column: 1 }],
+            notx: false
+          },
           noTransaction: false
         })
         .mockReturnValueOnce({
-          up: { statements: [content2], notx: false },
-          down: { statements: ["ALTER TABLE users DROP COLUMN email;"], notx: false },
+          up: {
+            statements: [content2],
+            statementMeta: [{ sql: content2, line: 1, column: 1 }],
+            notx: false
+          },
+          down: {
+            statements: ["ALTER TABLE users DROP COLUMN email;"],
+            statementMeta: [{ sql: "ALTER TABLE users DROP COLUMN email;", line: 1, column: 1 }],
+            notx: false
+          },
           noTransaction: false
         })
         .mockReturnValueOnce({
-          up: { statements: [content3], notx: false },
-          down: { statements: ["DROP INDEX idx_email;"], notx: false },
+          up: {
+            statements: [content3],
+            statementMeta: [{ sql: content3, line: 1, column: 1 }],
+            notx: false
+          },
+          down: {
+            statements: ["DROP INDEX idx_email;"],
+            statementMeta: [{ sql: "DROP INDEX idx_email;", line: 1, column: 1 }],
+            notx: false
+          },
           noTransaction: false
         });
 

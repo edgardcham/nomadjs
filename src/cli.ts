@@ -10,6 +10,7 @@ import { resolveRuntimeConfig } from "./config.js";
 import { formatExitCodesHelp, ConnectionError, ParseConfigError, DriftError, MissingFileError } from "./core/errors.js";
 import type { Config } from "./config.js";
 import { logger } from "./utils/logger.js";
+import { formatCliError } from "./utils/format-error.js";
 import { runDoctor, type DoctorReport } from "./core/doctor.js";
 
 type BaseArgs = {
@@ -453,14 +454,15 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
       // If there's an error with an exitCode, use it
       if (err && typeof (err as any).exitCode === 'number') {
         const exitErr = err as any;
-        const message = exitErr.message || msg;
-        if (message) {
-          logger.error(message);
+        const formatted = formatCliError(exitErr) || msg;
+        if (formatted) {
+          logger.error(formatted);
         }
         process.exit(exitErr.exitCode);
       } else {
         // Otherwise show help and exit with code 1
-        logger.error(msg || (err as any)?.message || 'Unknown error');
+        const formatted = formatCliError(err) || msg || 'Unknown error';
+        logger.error(formatted);
         process.exit(1);
       }
     })
