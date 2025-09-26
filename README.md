@@ -8,19 +8,19 @@
 Production-ready SQL migration tool for Node.js with checksums, transaction control, and advanced PostgreSQL support.
 
 **Key Features:**
-- 🔒 SHA-256 checksums for drift detection
-- 🎯 Automatic transaction wrapping with hazard detection
-- 🚨 Detects operations that can't run in transactions (CREATE INDEX CONCURRENTLY, etc.)
-- 🐘 Full PostgreSQL support (dollar quotes, E-strings, COPY)
-- 📝 TOML/JSON configuration with env var substitution
-- ✅ 300+ tests passing with comprehensive edge case coverage
-- 🎯 Performance optimized with migration file caching
-- 🗜️ Configurable database schema support
-- 🚀 Standardized exit codes for CI/CD integration
-- 🔐 Advisory locking prevents concurrent migrations
-- 📊 JSON output for automation and monitoring
-- 📍 File:line:column error reporting for instant debugging
-- 🌈 Color-aware CLI output respecting `NO_COLOR`/`NOMAD_NO_COLOR`
+- SHA-256 checksums for drift detection
+- Automatic transaction wrapping with hazard detection
+- Detects operations that can't run in transactions (CREATE INDEX CONCURRENTLY, etc.)
+- Full PostgreSQL support (dollar quotes, E-strings, COPY)
+- TOML/JSON configuration with env var substitution
+- 300+ tests passing with comprehensive edge case coverage
+- Performance optimized with migration file caching
+- Configurable database schema support
+- Standardized exit codes for CI/CD integration
+- Advisory locking prevents concurrent migrations
+- JSON output for automation and monitoring
+- File:line:column error reporting for instant debugging
+- Color-aware CLI output respecting `NO_COLOR`/`NOMAD_NO_COLOR`
 
 ## Installation
 

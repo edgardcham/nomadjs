@@ -46,7 +46,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y postgresql-client
           for i in {1..30}; do
-            PGPASSWORD=nomad psql -h localhost -U postgres -d nomad_test -c '\\q' && break
+            PGPASSWORD=nomad psql -h localhost -U postgres -d nomad_test -tAc 'SELECT 1' >/dev/null 2>&1 && break
             echo "Waiting for Postgres..."; sleep 2
           done
 
