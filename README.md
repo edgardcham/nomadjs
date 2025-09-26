@@ -1,4 +1,4 @@
-# NomadJS
+# Nomad
 
 [![CI](https://github.com/edgardcham/nomadjs/actions/workflows/ci.yml/badge.svg)](https://github.com/edgardcham/nomadjs/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/%40loopfox%2Fnomad.svg)](https://www.npmjs.com/package/@loopfox/nomad)
