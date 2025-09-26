@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/edgardcham/nomadjs/actions/workflows/ci.yml/badge.svg)](https://github.com/edgardcham/nomadjs/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/%40loopfox%2Fnomad.svg)](https://www.npmjs.com/package/@loopfox/nomad)
+[![Node >= 20](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](#installation)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Production-ready SQL migration tool for Node.js with checksums, transaction control, and advanced PostgreSQL support.
@@ -22,6 +23,8 @@ Production-ready SQL migration tool for Node.js with checksums, transaction cont
 - 🌈 Color-aware CLI output respecting `NO_COLOR`/`NOMAD_NO_COLOR`
 
 ## Installation
+
+Requirements: Node.js 20 or newer.
 
 After publish (recommended for most users):
 
@@ -370,6 +373,13 @@ Summary: 3 pass, 1 warn, 0 fail
 ```
 
 Warnings keep the exit code at 0 so you can surface issues without breaking CI. Use `nomad doctor --json` to capture machine-readable reports.
+
+Optional fast connection failure for unreachable hosts:
+- You can enable a short client connection timeout to fail fast in CI/integration tests when the database host is unreachable.
+- Configure via `NOMAD_PG_CONNECT_TIMEOUT_MS` (milliseconds), for example:
+  ```bash
+  export NOMAD_PG_CONNECT_TIMEOUT_MS=3000
+  ```
 
 ## Tag Filtering
 

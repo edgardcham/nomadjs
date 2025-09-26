@@ -38,6 +38,18 @@ type PlanArgs = BaseArgs & {
   dryRun?: boolean;
 };
 
+function makePool(url: string): Pool {
+  const cfg: any = { connectionString: url };
+  const raw = process.env.NOMAD_PG_CONNECT_TIMEOUT_MS;
+  if (raw) {
+    const ms = parseInt(raw, 10);
+    if (!Number.isNaN(ms) && ms > 0) {
+      cfg.connectionTimeoutMillis = ms;
+    }
+  }
+  return new Pool(cfg);
+}
+
 async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promise<T>): Promise<T> {
   const runtime = resolveRuntimeConfig({
     cli: {
@@ -54,7 +66,7 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
     throw new Error("DATABASE_URL is not set (provide via --url, config file, or environment variable)");
   }
 
-  const pool = new Pool({ connectionString: runtime.url });
+  const pool = makePool(runtime.url);
   const config: Config = {
     driver: "postgres",
     url: runtime.url,
@@ -415,7 +427,7 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
         throw new ParseConfigError("DATABASE_URL is not set (provide via --url, config file, or environment variable)");
       }
 
-      const pool = new Pool({ connectionString: runtime.url });
+      const pool = makePool(runtime.url);
       const config: Config = {
         driver: "postgres",
         url: runtime.url,
