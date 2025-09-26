@@ -3,15 +3,27 @@
   "version": "0.1.0",
   "description": "Nomad-style SQL migrations for Node.js",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/edgardcham/nomadjs.git"
+  },
+  "homepage": "https://github.com/edgardcham/nomadjs#readme",
+  "bugs": {
+    "url": "https://github.com/edgardcham/nomadjs/issues"
+  },
   "bin": {
     "nomad": "./bin/nomad"
   },
+  "preferGlobal": true,
   "exports": {
     ".": {
       "types": "./dist/esm/index.d.ts",
       "import": "./dist/esm/index.js",
       "require": "./dist/cjs/index.cjs"
     }
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "files": [
     "dist",

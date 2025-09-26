@@ -1,0 +1,62 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: nomad
+          POSTGRES_DB: nomad_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d nomad_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Wait for Postgres
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          for i in {1..30}; do
+            PGPASSWORD=nomad psql -h localhost -U postgres -d nomad_test -c '\\q' && break
+            echo "Waiting for Postgres..."; sleep 2
+          done
+
+      - name: Test (incl. CLI integration)
+        env:
+          DATABASE_URL: postgresql://postgres:nomad@localhost:5432/nomad_test
+          NOMAD_TEST_WITH_DB: 'true'
+        run: npm test
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+

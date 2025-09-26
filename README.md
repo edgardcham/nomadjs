@@ -1,5 +1,9 @@
 # NomadJS
 
+[![CI](https://github.com/edgardcham/nomadjs/actions/workflows/ci.yml/badge.svg)](https://github.com/edgardcham/nomadjs/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/nomadjs.svg)](https://www.npmjs.com/package/nomadjs)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Production-ready SQL migration tool for Node.js with checksums, transaction control, and advanced PostgreSQL support.
 
 **Key Features:**
@@ -17,7 +21,16 @@ Production-ready SQL migration tool for Node.js with checksums, transaction cont
 - 📍 File:line:column error reporting for instant debugging
 - 🌈 Color-aware CLI output respecting `NO_COLOR`/`NOMAD_NO_COLOR`
 
-## Installation & Linking
+## Installation
+
+After publish (recommended for most users):
+
+```bash
+npm install -g nomadjs
+nomad --help
+```
+
+For local development of this repository:
 
 ```bash
 npm install
