@@ -54,4 +54,5 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:nomad@localhost:5432/nomad_test
           NOMAD_TEST_WITH_DB: "true"
+          NOMAD_PG_CONNECT_TIMEOUT_MS: "2000"
         run: npm test
