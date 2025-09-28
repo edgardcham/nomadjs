@@ -426,7 +426,15 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
         throw new ParseConfigError("DATABASE_URL is not set (provide via --url, config file, or environment variable)");
       }
 
-      const pool = makePool(runtime.url);
+      const timeoutEnv = process.env.NOMAD_PG_CONNECT_TIMEOUT_MS;
+      let connectTimeout: number | undefined;
+      if (timeoutEnv) {
+        const ms = parseInt(timeoutEnv, 10);
+        if (!Number.isNaN(ms) && ms > 0) {
+          connectTimeout = ms;
+        }
+      }
+
       const config: Config = {
         driver: "postgres",
         url: runtime.url,
@@ -437,6 +445,9 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
         autoNotx: argv.autoNotx || process.env.NOMAD_AUTO_NOTX === "true",
         lockTimeout: argv.lockTimeout || parseInt(process.env.NOMAD_LOCK_TIMEOUT || "30000", 10)
       };
+
+      const driver = createDriver(config, { connectTimeoutMs: connectTimeout });
+      const pool = driver.getPool();
 
       try {
         const report = await runDoctor(config, pool, { fix: argv.fix === true });
@@ -453,7 +464,7 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
           throw new ConnectionError(connectionFailure.message);
         }
       } finally {
-        await pool.end();
+        await driver.close();
       }
     }
   );

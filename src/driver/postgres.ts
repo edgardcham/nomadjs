@@ -60,13 +60,13 @@ class PostgresConnection implements DriverConnection {
       []
     );
 
-    const rows = (result.rows ?? []).map(row => ({
-      version: BigInt(row.version as string | number),
-      name: row.name as string,
-      checksum: row.checksum as string,
+    const rows: AppliedMigrationRow[] = (result.rows ?? []).map((row: { version: string | number; name: string; checksum: string; applied_at: string | Date | null; rolled_back_at: string | Date | null }): AppliedMigrationRow => ({
+      version: BigInt(row.version),
+      name: row.name,
+      checksum: row.checksum,
       appliedAt: row.applied_at ? new Date(row.applied_at) : null,
       rolledBackAt: row.rolled_back_at ? new Date(row.rolled_back_at) : null
-    } satisfies AppliedMigrationRow));
+    }));
 
     rows.sort((a, b) => (a.version < b.version ? -1 : a.version > b.version ? 1 : 0));
     return rows;
