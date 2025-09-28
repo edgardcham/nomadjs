@@ -7,7 +7,6 @@ import { listMigrationFiles, filenameToVersion } from "../../src/core/files.js";
 import { parseNomadSqlFile } from "../../src/parser/enhanced-parser.js";
 import { calculateChecksum } from "../../src/core/checksum.js";
 import { detectHazards, validateHazards } from "../../src/core/hazards.js";
-import { AdvisoryLock } from "../../src/core/advisory-lock.js";
 
 // Mock dependencies
 vi.mock("node:fs");
@@ -15,26 +14,43 @@ vi.mock("../../src/core/files.js");
 vi.mock("../../src/parser/enhanced-parser.js");
 vi.mock("../../src/core/checksum.js");
 vi.mock("../../src/core/hazards.js");
-vi.mock("../../src/core/advisory-lock.js");
 
 describe("Migrator.redo()", () => {
   let migrator: Migrator;
+  let dropShouldFail: boolean;
   let mockPool: any;
   let mockClient: any;
   let config: Config;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    dropShouldFail = false;
+
+    const queryMock = vi.fn(async (sql: string) => {
+      if (typeof sql === "string") {
+        const trimmed = sql.trim();
+        if (dropShouldFail && trimmed === "DROP TABLE users;") {
+          throw new Error("Table does not exist");
+        }
+        if (trimmed.includes("pg_try_advisory_lock")) {
+          return { rows: [{ pg_try_advisory_lock: true }] };
+        }
+        if (trimmed.includes("pg_advisory_unlock")) {
+          return { rows: [{ pg_advisory_unlock: true }] };
+        }
+      }
+      return { rows: [] };
+    });
 
     // Mock client
     mockClient = {
-      query: vi.fn().mockResolvedValue({ rows: [] }),
+      query: queryMock,
       release: vi.fn()
     };
 
     // Mock pool
     mockPool = {
-      query: vi.fn().mockResolvedValue({ rows: [] }), // Default empty rows
+      query: queryMock, // Shared with client for connection-based queries
       connect: vi.fn().mockResolvedValue(mockClient)
     };
 
@@ -48,13 +64,6 @@ describe("Migrator.redo()", () => {
       autoNotx: false,
       lockTimeout: 30000
     };
-
-    // Mock AdvisoryLock
-    vi.mocked(AdvisoryLock).mockImplementation(() => ({
-      acquireWithCleanup: vi.fn().mockResolvedValue(
-        vi.fn().mockResolvedValue(undefined) // cleanup function
-      )
-    } as any));
 
     // Mock hazard detection
     vi.mocked(detectHazards).mockReturnValue([]);
@@ -90,7 +99,7 @@ describe("Migrator.redo()", () => {
       ];
 
       // Mock pool queries in order
-      mockPool.query.mockReset();
+      mockPool.query.mockClear();
       mockPool.query
         .mockResolvedValueOnce({ rows: [] }) // ensureTable CREATE TABLE
         .mockResolvedValueOnce({ rows: appliedMigrations }); // getAppliedMigrations
@@ -471,13 +480,7 @@ DROP TABLE users;`;
         tags: []
       });
 
-      // Make the DROP fail
-      mockClient.query.mockImplementation((sql) => {
-        if (sql === "DROP TABLE users;") {
-          throw new Error("Table does not exist");
-        }
-        return Promise.resolve();
-      });
+      dropShouldFail = true;
 
       await expect(migrator.redo()).rejects.toThrow("Table does not exist");
 
@@ -582,16 +585,13 @@ DROP TABLE users;`;
         tags: []
       });
 
-      const mockCleanup = vi.fn();
-      vi.mocked(AdvisoryLock).mockImplementation(() => ({
-        acquireWithCleanup: vi.fn().mockResolvedValue(mockCleanup)
-      } as any));
-
       await migrator.redo();
 
-      // Verify lock was acquired and released
-      expect(AdvisoryLock).toHaveBeenCalled();
-      expect(mockCleanup).toHaveBeenCalled();
+      const lockCalls = mockPool.query.mock.calls
+        .map(call => call[0])
+        .filter(sql => typeof sql === "string");
+      expect(lockCalls.some(sql => (sql as string).includes("pg_try_advisory_lock"))).toBe(true);
+      expect(lockCalls.some(sql => (sql as string).includes("pg_advisory_unlock"))).toBe(true);
     });
   });
 
@@ -666,15 +666,31 @@ DROP TABLE users;`);
         tags: []
       });
 
-      // Import and use LockTimeoutError
       const { LockTimeoutError } = await import("../../src/core/errors.js");
+      config.lockTimeout = 5;
 
-      // Simulate lock timeout
-      vi.mocked(AdvisoryLock).mockImplementation(() => ({
-        acquireWithCleanup: vi.fn().mockRejectedValue(new LockTimeoutError(30000))
-      } as any));
+      const originalImpl = mockPool.query.getMockImplementation();
+      mockPool.query.mockImplementation(async (...args: any[]) => {
+        const [sql] = args;
+        if (typeof sql === "string") {
+          if (sql.includes("pg_try_advisory_lock")) {
+            return { rows: [{ pg_try_advisory_lock: false }] };
+          }
+          if (sql.includes("pg_advisory_unlock")) {
+            return { rows: [{ pg_advisory_unlock: true }] };
+          }
+          if (sql.includes("SELECT version") || sql.includes("FROM nomad_migrations")) {
+            return { rows: appliedMigrations };
+          }
+        }
+        return originalImpl ? await originalImpl(...args) : { rows: [] };
+      });
 
       await expect(migrator.redo()).rejects.toThrow(LockTimeoutError);
+
+      if (originalImpl) {
+        mockPool.query.mockImplementation(originalImpl);
+      }
     });
   });
 });

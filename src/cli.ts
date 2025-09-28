@@ -78,7 +78,7 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
 
   const driver = createDriver(config, { connectTimeoutMs: connectTimeout });
   const pool = driver.getPool();
-  const migrator = new Migrator(config, pool, driver);
+  const migrator = new Migrator(config, driver);
 
   try {
     // Test connection before proceeding

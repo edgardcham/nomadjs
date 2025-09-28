@@ -23,21 +23,22 @@ describe("Migrator SQL error formatting", () => {
       parsed
     };
 
-    const queryMock = vi.fn(async (sql: string) => {
-      if (sql === "BEGIN" || sql === "ROLLBACK" || sql === "COMMIT") {
-        return { rows: [] } as any;
-      }
-
+    const runStatement = vi.fn(async (sql: string) => {
       if (sql.startsWith("CREATE TABLE")) {
         const err = new Error("syntax error at or near \"PRIMARY\"");
         (err as any).position = "27"; // points to PRIMARY keyword on line 2
         throw err;
       }
-
-      return { rows: [] } as any;
+      return undefined;
     });
 
-    const client = { query: queryMock } as any;
+    const connection = {
+      beginTransaction: vi.fn().mockResolvedValue(undefined),
+      runStatement,
+      markMigrationApplied: vi.fn().mockResolvedValue(undefined),
+      commitTransaction: vi.fn().mockResolvedValue(undefined),
+      rollbackTransaction: vi.fn().mockResolvedValue(undefined)
+    } as any;
     const config: Config = {
       driver: "postgres",
       url: "postgresql://localhost/test",
@@ -50,7 +51,7 @@ describe("Migrator SQL error formatting", () => {
 
     const migrator = new Migrator(config, { query: vi.fn(), connect: vi.fn(), end: vi.fn() } as any);
 
-    await expect((migrator as any).applyUpWithClient(migration, client))
+    await expect((migrator as any).applyUpWithConnection(migration, connection))
       .rejects.toMatchObject({
         constructor: SqlError,
         file: filepath,

@@ -4,6 +4,7 @@ export interface DriverOptions {
   table: string;
   schema?: string;
   connectTimeoutMs?: number;
+  pool?: Pool;
 }
 
 export interface AppliedMigrationRow {

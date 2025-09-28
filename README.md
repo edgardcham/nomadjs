@@ -448,6 +448,8 @@ Event types:
 Notes:
 - Events are emitted to stdout as one JSON object per line (NDJSON).
 - Human logs (including `--verbose`) remain colorized and readable.
+- A living multi-database roadmap (Postgres driver, upcoming MySQL/SQLite work)
+  is documented in [MySQL_SUPPORT.md](MySQL_SUPPORT.md).
 
 ## Error Reporting
 

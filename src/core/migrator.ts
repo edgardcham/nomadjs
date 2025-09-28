@@ -1,16 +1,17 @@
 import { basename } from "node:path";
+import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { listMigrationFiles, filenameToVersion } from "./files.js";
 import { parseNomadSqlFile, type ParsedMigration } from "../parser/enhanced-parser.js";
 import { calculateChecksum, verifyChecksum } from "./checksum.js";
 import { detectHazards, validateHazards } from "./hazards.js";
-import { AdvisoryLock } from "./advisory-lock.js";
 import { DriftError, MissingFileError, SqlError, ConnectionError, ChecksumMismatchError, LockTimeoutError } from "./errors.js";
 import { Planner, type PlanOptions, type MigrationPlan } from "./planner.js";
 import { matchesFilter, type TagFilter } from "./tags.js";
 import type { Config } from "../config.js";
-import type { Driver } from "../driver/types.js";
 import type { Pool } from "pg";
+import type { Driver, DriverConnection } from "../driver/types.js";
+import { createPostgresDriver } from "../driver/postgres.js";
 import { logger } from "../utils/logger.js";
 import { emitEvent, previewSql } from "../utils/events.js";
 
@@ -58,34 +59,113 @@ export interface VerifyResult {
   }>;
 }
 
+function isDriver(value: Driver | Pool): value is Driver {
+  return typeof (value as Driver).getPool === "function" && typeof (value as Driver).connect === "function";
+}
+
 export class Migrator {
-  private pool: Pool;
-  private config: Config;
-  private driver?: Driver;
+  private readonly config: Config;
+  private readonly driver: Driver;
+  private readonly pool: Pool;
+  private readonly lockKey: string;
   private migrationFileCache: Map<string, MigrationFile> = new Map();
   private cacheLastModified: Map<string, number> = new Map();
   private cacheLastSize: Map<string, number> = new Map();
 
-  constructor(config: Config, pool: Pool, driver?: Driver) {
+  constructor(config: Config, driverOrPool: Driver | Pool) {
     this.config = config;
-    this.pool = pool;
-    this.driver = driver;
+
+    if (isDriver(driverOrPool)) {
+      this.driver = driverOrPool;
+    } else {
+      const table = config.table || "nomad_migrations";
+      const schema = config.schema;
+      const url = config.url || "";
+      this.driver = createPostgresDriver({
+        url,
+        table,
+        schema,
+        pool: driverOrPool
+      });
+    }
+
+    this.pool = this.driver.getPool();
+    this.lockKey = this.computeLockKey();
+  }
+
+  private async withConnection<T>(fn: (connection: DriverConnection) => Promise<T>): Promise<T> {
+    const connection = await this.driver.connect();
+    try {
+      return await fn(connection);
+    } finally {
+      await connection.dispose();
+    }
+  }
+
+  private computeLockKey(): string {
+    const parts = [
+      this.config.url || "",
+      this.config.schema || "public",
+      this.config.table || "nomad_migrations",
+      this.config.dir || ""
+    ];
+    const combined = parts.join("|");
+    return createHash("sha256").update(combined).digest("hex");
+  }
+
+  private async acquireLock(connection: DriverConnection): Promise<() => Promise<void>> {
+    const lockKey = this.lockKey;
+    const timeout = this.config.lockTimeout || 30000;
+    const start = Date.now();
+    let delay = 100;
+    const maxDelay = 5000;
+
+    while (true) {
+      const acquired = await connection.acquireLock(lockKey, timeout);
+      if (acquired) break;
+      if (Date.now() - start >= timeout) {
+        throw new LockTimeoutError(timeout);
+      }
+      await this.sleep(delay);
+      delay = Math.min(delay * 2, maxDelay);
+    }
+
+    let released = false;
+    const release = async () => {
+      if (released) return;
+      released = true;
+      try {
+        await connection.releaseLock(lockKey);
+      } catch (error) {
+        logger.error(`Error releasing advisory lock: ${(error as Error).message}`);
+      }
+    };
+
+    const handler = async () => {
+      logger.warn("\nReceived interrupt signal, releasing migration lock...");
+      await release();
+      process.exit(130);
+    };
+
+    process.on("SIGINT", handler);
+    process.on("SIGTERM", handler);
+
+    return async () => {
+      process.off("SIGINT", handler);
+      process.off("SIGTERM", handler);
+      await release();
+    };
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   /**
    * Ensure the migrations table exists with v2 schema
    */
   async ensureTable(): Promise<void> {
-    const table = this.config.table || "nomad_migrations";
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS ${table} (
-        version     BIGINT PRIMARY KEY,
-        name        TEXT NOT NULL,
-        checksum    TEXT NOT NULL,
-        applied_at  TIMESTAMPTZ,
-        rolled_back_at TIMESTAMPTZ
-      )
-    `);
+    await this.withConnection(connection => connection.ensureMigrationsTable());
   }
 
   /**
@@ -182,21 +262,17 @@ export class Migrator {
    * Get applied migrations from database
    */
   async getAppliedMigrations(): Promise<AppliedMigration[]> {
-    const table = this.config.table || "nomad_migrations";
-    const result = await this.pool.query(`
-      SELECT version, name, checksum, applied_at, rolled_back_at
-      FROM ${table}
-      WHERE applied_at IS NOT NULL
-      ORDER BY version ASC
-    `);
+    const rows = await this.withConnection(connection => connection.fetchAppliedMigrations());
 
-    return result.rows.map(row => ({
-      version: BigInt(row.version as string | number),
-      name: row.name as string,
-      checksum: row.checksum as string,
-      appliedAt: row.applied_at as Date,
-      rolledBackAt: row.rolled_back_at as Date | null
-    }));
+    return rows
+      .filter(row => row.appliedAt !== null)
+      .map(row => ({
+        version: row.version,
+        name: row.name,
+        checksum: row.checksum,
+        appliedAt: row.appliedAt as Date,
+        rolledBackAt: row.rolledBackAt
+      }));
   }
 
   /**
@@ -529,27 +605,14 @@ export class Migrator {
    * Migrate to a specific target version (apply or rollback as needed)
    */
   async to(targetVersion: bigint): Promise<void> {
-    // Acquire advisory lock
-    const lock = new AdvisoryLock({
-      url: this.config.url,
-      schema: this.config.schema || "public",
-      table: this.config.table,
-      dir: this.config.dir
-    });
-
-    const client = await this.pool.connect();
+    const connection = await this.driver.connect();
     let cleanup: (() => Promise<void>) | undefined;
 
     try {
-      const lockTimeout = this.config.lockTimeout || 30000;
-      cleanup = await lock.acquireWithCleanup(client, {
-        timeout: lockTimeout,
-        retryDelay: 100,
-        maxRetryDelay: 5000
-      });
+      cleanup = await this.acquireLock(connection);
       emitEvent(this.config.eventsJson, { event: "lock-acquired", ts: new Date().toISOString() });
 
-      await this.ensureTable();
+      await connection.ensureMigrationsTable();
 
       const files = await this.loadMigrationFiles();
       const applied = await this.getAppliedMigrations();
@@ -557,7 +620,6 @@ export class Migrator {
       const appliedVersions = new Set(activeApplied.map(a => a.version.toString()));
       const fileMap = new Map(files.map(f => [f.version.toString(), f]));
 
-      // Pre-check: if rolling back, ensure files exist and checksums OK
       let currentMax = 0n;
       for (const a of activeApplied) {
         if (a.version > currentMax) currentMax = a.version;
@@ -587,7 +649,6 @@ export class Migrator {
         }
       }
 
-      // Build plan via Planner for correct order
       const planner = new Planner(this.config.autoNotx);
       const plan = planner.planTo(files, appliedVersions, targetVersion, {});
 
@@ -597,23 +658,22 @@ export class Migrator {
         logger.action(`Applying ${plan.migrations.length} migration(s) to reach ${targetVersion}`);
         for (const pm of plan.migrations) {
           const mf = fileMap.get(pm.version.toString());
-          if (!mf) continue; // Shouldn't happen
+          if (!mf) continue;
           emitEvent(this.config.eventsJson, { event: "apply-start", direction: "up", version: String(mf.version), name: mf.name, ts: new Date().toISOString() });
-          const res = await this.applyUpWithClient(mf, client);
+          const res = await this.applyUpWithConnection(mf, connection);
           emitEvent(this.config.eventsJson, { event: "apply-end", direction: "up", version: String(mf.version), name: mf.name, ms: res.ms, ts: new Date().toISOString() });
         }
       } else {
         logger.action(`Rolling back ${plan.migrations.length} migration(s) to reach ${targetVersion}`);
         for (const pm of plan.migrations) {
           const mf = fileMap.get(pm.version.toString());
-          if (!mf) continue; // Pre-check above should catch missing files
+          if (!mf) continue;
           emitEvent(this.config.eventsJson, { event: "apply-start", direction: "down", version: String(mf.version), name: mf.name, ts: new Date().toISOString() });
-          const res = await this.applyDownWithClient(mf, client);
+          const res = await this.applyDownWithConnection(mf, connection);
           emitEvent(this.config.eventsJson, { event: "apply-end", direction: "down", version: String(mf.version), name: mf.name, ms: res.ms, ts: new Date().toISOString() });
         }
       }
 
-      // Log final state summary
       const refreshedApplied = await this.getAppliedMigrations();
       let finalMax = 0n;
       for (const a of refreshedApplied.filter(a => !a.rolledBackAt)) {
@@ -631,7 +691,7 @@ export class Migrator {
         cleanup = undefined;
         emitEvent(this.config.eventsJson, { event: "lock-released", ts: new Date().toISOString() });
       }
-      client.release();
+      await connection.dispose();
     }
   }
 
@@ -639,29 +699,14 @@ export class Migrator {
    * Apply migrations up
    */
   async up(limit?: number, filter?: TagFilter, includeAncestors?: boolean): Promise<void> {
-    // Acquire advisory lock
-    const lock = new AdvisoryLock({
-      url: this.config.url,
-      schema: this.config.schema || "public",
-      table: this.config.table,
-      dir: this.config.dir
-    });
-
-    const client = await this.pool.connect();
+    const connection = await this.driver.connect();
     let cleanup: (() => Promise<void>) | undefined;
 
     try {
-      // Try to acquire lock with timeout
-      const lockTimeout = this.config.lockTimeout || 30000;
-      cleanup = await lock.acquireWithCleanup(client, {
-        timeout: lockTimeout,
-        retryDelay: 100,
-        maxRetryDelay: 5000
-      });
+      cleanup = await this.acquireLock(connection);
       emitEvent(this.config.eventsJson, { event: "lock-acquired", ts: new Date().toISOString() });
 
-      // Now proceed with migrations
-      await this.ensureTable();
+      await connection.ensureMigrationsTable();
 
       const files = await this.loadMigrationFiles();
       const applied = await this.getAppliedMigrations();
@@ -671,17 +716,16 @@ export class Migrator {
           .map(a => a.version.toString())
       );
 
-      const isPending = (f: MigrationFile) => !appliedVersions.has(f.version.toString());
-      const pendingAll = files.filter(isPending);
-      let pending = pendingAll;
+      let pendingAll = files.filter(f => !appliedVersions.has(f.version.toString()));
+      let pending: MigrationFile[];
+
       if (filter) {
         const selected = pendingAll.filter(f => matchesFilter(f.parsed.tags, filter));
         if (includeAncestors && selected.length > 0) {
           const earliest = selected[0]!.version;
-          pending = files.filter(f => isPending(f) && (f.version <= earliest || matchesFilter(f.parsed.tags, filter)));
+          pending = files.filter(f => !appliedVersions.has(f.version.toString()) && (f.version <= earliest || matchesFilter(f.parsed.tags, filter)));
           logger.info(`Including ancestors up to ${earliest}`);
         } else {
-          // Warn if earlier pending exist but not included
           pending = selected;
           if (selected.length > 0) {
             const minSel = selected[0]!.version;
@@ -691,7 +735,10 @@ export class Migrator {
             }
           }
         }
+      } else {
+        pending = pendingAll;
       }
+
       const toApply = typeof limit === "number" ? pending.slice(0, Math.max(limit, 0)) : pending;
 
       logger.action(`Applying ${toApply.length} migration(s) (${pending.length} pending out of ${files.length})`);
@@ -705,7 +752,7 @@ export class Migrator {
           logger.action(`→ executing m${idx + 1}/${totalMigrations} ${migration.version} (${migration.name})`);
         }
         emitEvent(this.config.eventsJson, { event: "apply-start", direction: "up", version: String(migration.version), name: migration.name, ts: new Date().toISOString() });
-        const res = await this.applyUpWithClient(migration, client);
+        const res = await this.applyUpWithConnection(migration, connection);
         totalStatements += res.statements;
         emitEvent(this.config.eventsJson, { event: "apply-end", direction: "up", version: String(migration.version), name: migration.name, ms: res.ms, ts: new Date().toISOString() });
         if (this.config.verbose) {
@@ -722,13 +769,12 @@ export class Migrator {
       }
       throw error;
     } finally {
-      // Release lock and cleanup
       if (cleanup) {
         await cleanup();
         cleanup = undefined;
         emitEvent(this.config.eventsJson, { event: "lock-released", ts: new Date().toISOString() });
       }
-      client.release();
+      await connection.dispose();
     }
   }
 
@@ -736,29 +782,14 @@ export class Migrator {
    * Rollback migrations down
    */
   async down(count = 1, filter?: TagFilter): Promise<void> {
-    // Acquire advisory lock
-    const lock = new AdvisoryLock({
-      url: this.config.url,
-      schema: this.config.schema || "public",
-      table: this.config.table,
-      dir: this.config.dir
-    });
-
-    const client = await this.pool.connect();
+    const connection = await this.driver.connect();
     let cleanup: (() => Promise<void>) | undefined;
 
     try {
-      // Try to acquire lock with timeout
-      const lockTimeout = this.config.lockTimeout || 30000;
-      cleanup = await lock.acquireWithCleanup(client, {
-        timeout: lockTimeout,
-        retryDelay: 100,
-        maxRetryDelay: 5000
-      });
+      cleanup = await this.acquireLock(connection);
       emitEvent(this.config.eventsJson, { event: "lock-acquired", ts: new Date().toISOString() });
 
-      // Now proceed with rollback
-      await this.ensureTable();
+      await connection.ensureMigrationsTable();
 
       const files = await this.loadMigrationFiles();
       const applied = await this.getAppliedMigrations();
@@ -772,7 +803,7 @@ export class Migrator {
           return 0;
         });
 
-      const toRollbackApplied = [] as typeof activeApplied;
+      const toRollbackApplied: typeof activeApplied = [];
       if (filter) {
         for (const a of activeApplied) {
           const f = fileMap.get(a.version);
@@ -799,7 +830,6 @@ export class Migrator {
           throw new MissingFileError([`${appliedMig.version}_${appliedMig.name}`]);
         }
 
-        // Verify checksum before rollback
         if (appliedMig.checksum && appliedMig.checksum !== file.checksum && !this.config.allowDrift) {
           throw new ChecksumMismatchError({
             version: file.version,
@@ -813,7 +843,7 @@ export class Migrator {
           logger.action(`→ executing m${idx + 1}/${totalMigrations} ${file.version} (${file.name})`);
         }
         emitEvent(this.config.eventsJson, { event: "apply-start", direction: "down", version: String(file.version), name: file.name, ts: new Date().toISOString() });
-        const res = await this.applyDownWithClient(file, client);
+        const res = await this.applyDownWithConnection(file, connection);
         emitEvent(this.config.eventsJson, { event: "apply-end", direction: "down", version: String(file.version), name: file.name, ms: res.ms, ts: new Date().toISOString() });
         totalStatements += res.statements;
         if (this.config.verbose) {
@@ -831,13 +861,12 @@ export class Migrator {
       }
       throw error;
     } finally {
-      // Release lock and cleanup
       if (cleanup) {
         await cleanup();
         cleanup = undefined;
         emitEvent(this.config.eventsJson, { event: "lock-released", ts: new Date().toISOString() });
       }
-      client.release();
+      await connection.dispose();
     }
   }
 
@@ -848,7 +877,6 @@ export class Migrator {
   async redo(): Promise<void> {
     await this.ensureTable();
 
-    const table = this.config.table || "nomad_migrations";
     const applied = await this.getAppliedMigrations();
     const files = await this.loadMigrationFiles();
 
@@ -856,10 +884,7 @@ export class Migrator {
       throw new Error("No migrations to redo");
     }
 
-    // Always redo the last applied migration (no version selection allowed)
     const targetMigration = applied[applied.length - 1]!;
-
-    // Find the migration file
     const file = files.find(f => f.version === targetMigration.version);
     if (!file) {
       throw new MissingFileError([
@@ -867,7 +892,6 @@ export class Migrator {
       ]);
     }
 
-    // Verify checksum (unless drift is allowed)
     if (!this.config.allowDrift && file.checksum !== targetMigration.checksum) {
       throw new ChecksumMismatchError({
         version: targetMigration.version,
@@ -880,34 +904,21 @@ export class Migrator {
       logger.warn(`Checksum mismatch for migration ${targetMigration.version} (${targetMigration.name})`);
     }
 
-    // Acquire advisory lock
-    const lock = new AdvisoryLock({
-      url: this.config.url,
-      schema: this.config.schema || "public",
-      table: this.config.table,
-      dir: this.config.dir
-    });
-
-    const client = await this.pool.connect();
+    const connection = await this.driver.connect();
     let cleanup: (() => Promise<void>) | undefined;
 
     try {
-      // Acquire lock with timeout
-      cleanup = await lock.acquireWithCleanup(client, {
-        timeout: this.config.lockTimeout || 30000,
-        retryDelay: 100,
-        maxRetryDelay: 5000
-      });
+      cleanup = await this.acquireLock(connection);
       emitEvent(this.config.eventsJson, { event: "lock-acquired", ts: new Date().toISOString() });
 
       logger.action(`Rolling back ${targetMigration.version} (${targetMigration.name})`);
       emitEvent(this.config.eventsJson, { event: "apply-start", direction: "down", version: String(file.version), name: file.name, ts: new Date().toISOString() });
-      const downRes = await this.applyDownWithClient(file, client);
+      const downRes = await this.applyDownWithConnection(file, connection);
       emitEvent(this.config.eventsJson, { event: "apply-end", direction: "down", version: String(file.version), name: file.name, ms: downRes.ms, ts: new Date().toISOString() });
 
       logger.action(`Reapplying ${targetMigration.version} (${targetMigration.name})`);
       emitEvent(this.config.eventsJson, { event: "apply-start", direction: "up", version: String(file.version), name: file.name, ts: new Date().toISOString() });
-      const upRes = await this.applyUpWithClient(file, client);
+      const upRes = await this.applyUpWithConnection(file, connection);
       emitEvent(this.config.eventsJson, { event: "apply-end", direction: "up", version: String(file.version), name: file.name, ms: upRes.ms, ts: new Date().toISOString() });
 
       logger.success(`Redo complete: ${targetMigration.version} (${targetMigration.name})`);
@@ -917,165 +928,31 @@ export class Migrator {
       }
       throw error;
     } finally {
-      // Release lock and cleanup
       if (cleanup) {
         await cleanup();
         cleanup = undefined;
         emitEvent(this.config.eventsJson, { event: "lock-released", ts: new Date().toISOString() });
       }
-      client.release();
+      await connection.dispose();
     }
   }
 
   /**
-   * Execute down migration with proper transaction handling
+   * Apply a single migration up (legacy - gets own connection)
    */
-  private async executeDown(migration: MigrationFile, client: any): Promise<void> {
-    const table = this.config.table || "nomad_migrations";
-    const downStatements = migration.parsed.down.statements;
-
-    if (downStatements.length === 0) {
-      // No down migration - just update the database record
-      await client.query(
-        `UPDATE ${table} SET rolled_back_at = now() WHERE version = $1`,
-        [migration.version]
-      );
-      return;
-    }
-
-    // Check for hazards in down statements
-    const downSql = downStatements.join("\n");
-    const hazards = detectHazards(downSql);
-    const validation = validateHazards(hazards, migration.parsed.down.notx, {
-      autoNotx: this.config.autoNotx
-    });
-
-    if (!validation) {
-      throw new Error("Hazard validation failed");
-    }
-
-    const useTransaction = !migration.parsed.down.notx &&
-                          !(this.config.autoNotx && hazards.length > 0);
-
-    try {
-      if (useTransaction) {
-        await client.query("BEGIN");
-      }
-
-      // Execute each down statement
-      for (let i = 0; i < downStatements.length; i++) {
-        const statement = downStatements[i]!;
-        try {
-          await client.query(statement);
-        } catch (error) {
-          throw this.createSqlError("down", migration, statement, i, error);
-        }
-      }
-
-      // Update migration record
-      await client.query(
-        `UPDATE ${table} SET rolled_back_at = now() WHERE version = $1`,
-        [migration.version]
-      );
-
-      if (useTransaction) {
-        await client.query("COMMIT");
-      }
-    } catch (error) {
-      if (useTransaction) {
-        await client.query("ROLLBACK");
-      }
-      if (error instanceof SqlError) {
-        throw error;
-      }
-      throw new SqlError(`Down migration failed for ${migration.version}: ${(error as Error).message}`);
-    }
+  private async applyUp(migration: MigrationFile): Promise<void> {
+    await this.withConnection(connection => this.applyUpWithConnection(migration, connection).then(() => undefined));
   }
 
-  /**
-   * Execute up migration with proper transaction handling
-   */
-  private async executeUp(migration: MigrationFile, client: any): Promise<void> {
-    const table = this.config.table || "nomad_migrations";
-    const upStatements = migration.parsed.up.statements;
-
-    if (upStatements.length === 0) {
-      // No up migration - just update the database record
-      await client.query(
-        `UPDATE ${table} SET rolled_back_at = NULL, applied_at = now() WHERE version = $1`,
-        [migration.version]
-      );
-      return;
-    }
-
-    // Check for hazards in up statements
-    const upSql = upStatements.join("\n");
-    const hazards = detectHazards(upSql);
-    const validation = validateHazards(hazards, migration.parsed.up.notx || migration.parsed.noTransaction, {
-      autoNotx: this.config.autoNotx
-    });
-
-    if (!validation) {
-      throw new Error("Hazard validation failed");
-    }
-
-    const useTransaction = !(migration.parsed.up.notx || migration.parsed.noTransaction) &&
-                          !(this.config.autoNotx && hazards.length > 0);
-
-    try {
-      if (useTransaction) {
-        await client.query("BEGIN");
-      }
-
-      // Execute each up statement
-      for (let i = 0; i < upStatements.length; i++) {
-        const statement = upStatements[i]!;
-        try {
-          await client.query(statement);
-        } catch (error) {
-          throw this.createSqlError("up", migration, statement, i, error);
-        }
-      }
-
-      // Update migration record
-      await client.query(
-        `UPDATE ${table}
-         SET rolled_back_at = NULL,
-             applied_at = now(),
-             checksum = $2
-         WHERE version = $1`,
-        [migration.version, migration.checksum]
-      );
-
-      if (useTransaction) {
-        await client.query("COMMIT");
-      }
-    } catch (error) {
-      if (useTransaction) {
-        await client.query("ROLLBACK");
-      }
-      if (error instanceof SqlError) {
-        throw error;
-      }
-      throw new SqlError(`Up migration failed for ${migration.version}: ${(error as Error).message}`);
-    }
-  }
-
-  /**
-   * Apply a single migration up using provided client
-   */
-  private async applyUpWithClient(
+  private async applyUpWithConnection(
     migration: MigrationFile,
-    client: any
+    connection: DriverConnection
   ): Promise<{ statements: number; ms: number; usedTransaction: boolean }> {
-    const table = this.config.table || "nomad_migrations";
     const label = `${migration.version} (${migration.name})`;
 
-    // Check for hazards in up statements
     const upSql = migration.parsed.up.statements.join("\n");
     const hazards = detectHazards(upSql);
 
-    // Validate hazards and determine if we should skip transactions
     const validation = validateHazards(hazards, migration.parsed.up.notx || migration.parsed.noTransaction, {
       autoNotx: this.config.autoNotx,
       logger: (msg) => logger.warn(`⚠️  ${msg}`)
@@ -1086,28 +963,24 @@ export class Migrator {
     const startedAt = Date.now();
 
     if (total === 0) {
-      await client.query(
-        `INSERT INTO ${table} (version, name, checksum, applied_at)
-         VALUES ($1, $2, $3, NOW())
-         ON CONFLICT (version) DO UPDATE
-         SET applied_at = NOW(), rolled_back_at = NULL`,
-        [migration.version.toString(), migration.name, migration.checksum]
-      );
+      await connection.markMigrationApplied({
+        version: migration.version,
+        name: migration.name,
+        checksum: migration.checksum
+      });
       logger.success(`↑ up ${label}`);
       const ms = Date.now() - startedAt;
       return { statements: 0, ms, usedTransaction: false };
     }
 
     try {
-      if (shouldTx) {
-        await client.query("BEGIN");
-      }
+      if (shouldTx) await connection.beginTransaction();
 
       for (let i = 0; i < total; i++) {
         const statement = migration.parsed.up.statements[i]!;
         const start = Date.now();
         try {
-          await client.query(statement);
+          await connection.runStatement(statement);
         } catch (error) {
           throw this.createSqlError("up", migration, statement, i, error);
         }
@@ -1119,22 +992,23 @@ export class Migrator {
         emitEvent(this.config.eventsJson, { event: "stmt-run", direction: "up", version: String(migration.version), ms, preview: previewSql(statement) });
       }
 
-      await client.query(
-        `INSERT INTO ${table} (version, name, checksum, applied_at)
-         VALUES ($1, $2, $3, NOW())
-         ON CONFLICT (version) DO UPDATE
-         SET applied_at = NOW(), rolled_back_at = NULL`,
-        [migration.version.toString(), migration.name, migration.checksum]
-      );
+      await connection.markMigrationApplied({
+        version: migration.version,
+        name: migration.name,
+        checksum: migration.checksum
+      });
 
-      if (shouldTx) {
-        await client.query("COMMIT");
-      }
+      if (shouldTx) await connection.commitTransaction();
       logger.success(`↑ up ${label}`);
       const ms = Date.now() - startedAt;
-      return { statements: migration.parsed.up.statements.length, ms, usedTransaction: shouldTx };
+      return { statements: total, ms, usedTransaction: shouldTx };
     } catch (error) {
-      if (shouldTx) await client.query("ROLLBACK");
+      if (shouldTx) {
+        try {
+          await connection.rollbackTransaction();
+        } catch {
+        }
+      }
       if (error instanceof SqlError) {
         throw error;
       }
@@ -1143,32 +1017,17 @@ export class Migrator {
   }
 
   /**
-   * Apply a single migration up (legacy - gets own connection)
+   * Apply a single migration down using provided connection
    */
-  private async applyUp(migration: MigrationFile): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      await this.applyUpWithClient(migration, client);
-    } finally {
-      client.release();
-    }
-  }
-
-  /**
-   * Apply a single migration down using provided client
-   */
-  private async applyDownWithClient(
+  private async applyDownWithConnection(
     migration: MigrationFile,
-    client: any
+    connection: DriverConnection
   ): Promise<{ statements: number; ms: number; usedTransaction: boolean }> {
-    const table = this.config.table || "nomad_migrations";
     const label = `${migration.version} (${migration.name})`;
 
-    // Check for hazards in down statements
     const downSql = migration.parsed.down.statements.join("\n");
     const hazards = detectHazards(downSql);
 
-    // Validate hazards and determine if we should skip transactions
     const validation = validateHazards(hazards, migration.parsed.down.notx || migration.parsed.noTransaction, {
       autoNotx: this.config.autoNotx,
       logger: (msg) => logger.warn(`⚠️  ${msg}`)
@@ -1179,25 +1038,20 @@ export class Migrator {
     const startedAt = Date.now();
 
     if (total === 0) {
-      await client.query(
-        `UPDATE ${table}
-         SET rolled_back_at = NOW()
-         WHERE version = $1`,
-        [migration.version.toString()]
-      );
+      await connection.markMigrationRolledBack(migration.version);
       logger.info(`↓ down ${label}`);
       const ms = Date.now() - startedAt;
       return { statements: 0, ms, usedTransaction: false };
     }
 
     try {
-      if (shouldTx) await client.query("BEGIN");
+      if (shouldTx) await connection.beginTransaction();
 
       for (let i = 0; i < total; i++) {
         const statement = migration.parsed.down.statements[i]!;
         const start = Date.now();
         try {
-          await client.query(statement);
+          await connection.runStatement(statement);
         } catch (error) {
           throw this.createSqlError("down", migration, statement, i, error);
         }
@@ -1209,19 +1063,19 @@ export class Migrator {
         emitEvent(this.config.eventsJson, { event: "stmt-run", direction: "down", version: String(migration.version), ms, preview: previewSql(statement) });
       }
 
-      await client.query(
-        `UPDATE ${table}
-         SET rolled_back_at = NOW()
-         WHERE version = $1`,
-        [migration.version.toString()]
-      );
+      await connection.markMigrationRolledBack(migration.version);
 
-      if (shouldTx) await client.query("COMMIT");
+      if (shouldTx) await connection.commitTransaction();
       logger.info(`↓ down ${label}`);
       const ms = Date.now() - startedAt;
-      return { statements: migration.parsed.down.statements.length, ms, usedTransaction: shouldTx };
+      return { statements: total, ms, usedTransaction: shouldTx };
     } catch (error) {
-      if (shouldTx) await client.query("ROLLBACK");
+      if (shouldTx) {
+        try {
+          await connection.rollbackTransaction();
+        } catch {
+        }
+      }
       if (error instanceof SqlError) {
         throw error;
       }
@@ -1233,12 +1087,7 @@ export class Migrator {
    * Apply a single migration down (legacy - gets own connection)
    */
   private async applyDown(migration: MigrationFile): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      await this.applyDownWithClient(migration, client);
-    } finally {
-      client.release();
-    }
+    await this.withConnection(connection => this.applyDownWithConnection(migration, connection).then(() => undefined));
   }
 
   private createSqlError(

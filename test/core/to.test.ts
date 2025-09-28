@@ -127,7 +127,7 @@ describe("Migrator.to()", () => {
     expect(calls.some(sql => typeof sql === 'string' && sql.includes("CREATE TABLE t"))).toBe(true);
     expect(calls.some(sql => typeof sql === 'string' && sql.includes("INSERT INTO t"))).toBe(true);
     // Should record versions
-    expect(calls.some(sql => sql.includes("INSERT INTO nomad_migrations"))).toBe(true);
+    expect(calls.some(sql => sql.includes('INSERT INTO "nomad_migrations"') || sql.includes("INSERT INTO nomad_migrations"))).toBe(true);
   });
 
   it("rolls back down to target version", async () => {
@@ -179,7 +179,7 @@ describe("Migrator.to()", () => {
     // No further DML expected beyond lock/ensure/select
     // Specifically, no INSERT into nomad_migrations and no SET rolled_back_at
     const calls = queryMock.mock.calls.map(c => c[0] as string);
-    expect(calls.some(sql => typeof sql === 'string' && sql.includes("INSERT INTO nomad_migrations"))).toBe(false);
+    expect(calls.some(sql => typeof sql === 'string' && (sql.includes('INSERT INTO "nomad_migrations"') || sql.includes("INSERT INTO nomad_migrations")))).toBe(false);
     expect(calls.some(sql => typeof sql === 'string' && sql.includes("SET rolled_back_at"))).toBe(false);
   });
 

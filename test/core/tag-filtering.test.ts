@@ -6,6 +6,8 @@ import { calculateChecksum } from "../../src/core/checksum.js";
 import { readFileSync } from "node:fs";
 import { Pool } from "pg";
 import type { Config } from "../../src/config.js";
+import type { AppliedMigrationRow } from "../../src/driver/types.js";
+import { createDriverMock, type DriverMock } from "../helpers/driver-mock.js";
 
 vi.mock("pg");
 vi.mock("node:fs");
@@ -20,6 +22,7 @@ describe("Tag Filtering", () => {
   let readFileSyncMock: ReturnType<typeof vi.fn>;
   let parseNomadSqlFileMock: ReturnType<typeof vi.fn>;
   let filenameToVersionMock: ReturnType<typeof vi.fn>;
+  let driver: DriverMock;
 
   const config: Config = {
     driver: "postgres",
@@ -55,7 +58,8 @@ describe("Tag Filtering", () => {
       return match ? match[1] : undefined;
     });
 
-    migrator = new Migrator(config, mockPool);
+    driver = createDriverMock(mockPool as unknown as Pool);
+    migrator = new Migrator(config, driver);
   });
 
   it("planUp filters pending by tags", async () => {
@@ -75,13 +79,15 @@ describe("Tag Filtering", () => {
       // Tagged with users
       .mockReturnValueOnce({ up: { statements: [sql], notx: false }, down: { statements: [], notx: false }, noTransaction: false, tags: ["users"] });
 
-    // No applied rows
-    queryMock
-      .mockResolvedValueOnce({ rows: [] }) // ensureTable
-      .mockResolvedValueOnce({ rows: [] });
+    const ensureConn = driver.enqueueConnection();
+    const fetchConn = driver.enqueueConnection();
+    fetchConn.fetchAppliedMigrations.mockResolvedValueOnce([]);
 
     const plan = await migrator.planUp({ filter: { tags: ["seed"] } as any });
     expect(plan.migrations.map(m => m.name)).toEqual(["seed"]);
+    expect(ensureConn.ensureMigrationsTable).toHaveBeenCalledTimes(1);
+    expect(fetchConn.fetchAppliedMigrations).toHaveBeenCalledTimes(1);
+    expect((driver.connect as any)).toHaveBeenCalledTimes(2);
   });
 
   it("down rolls back only matching head", async () => {
@@ -99,24 +105,24 @@ describe("Tag Filtering", () => {
       .mockReturnValueOnce({ up: { statements: [sql], notx: false }, down: { statements: [sql], notx: false }, noTransaction: false, tags: undefined })
       .mockReturnValueOnce({ up: { statements: [sql], notx: false }, down: { statements: [sql], notx: false }, noTransaction: false, tags: ["seed"] });
 
-    // All applied
-    queryMock
-      .mockResolvedValueOnce({ rows: [] }) // ensureTable
-      .mockResolvedValueOnce({
-        rows: [
-          { version: "20240101120000", name: "one", checksum: calculateChecksum(sql), applied_at: new Date(), rolled_back_at: null },
-          { version: "20240102120000", name: "two", checksum: calculateChecksum(sql), applied_at: new Date(), rolled_back_at: null },
-          { version: "20240103120000", name: "three", checksum: calculateChecksum(sql), applied_at: new Date(), rolled_back_at: null }
-        ]
-      });
+    const ensureConn = driver.enqueueConnection();
+    const fetchConn = driver.enqueueConnection();
+    const appliedAt = new Date();
+    const appliedRows: AppliedMigrationRow[] = [
+      { version: 20240101120000n, name: "one", checksum: calculateChecksum(sql), appliedAt, rolledBackAt: null },
+      { version: 20240102120000n, name: "two", checksum: calculateChecksum(sql), appliedAt, rolledBackAt: null },
+      { version: 20240103120000n, name: "three", checksum: calculateChecksum(sql), appliedAt, rolledBackAt: null }
+    ];
+    fetchConn.fetchAppliedMigrations.mockResolvedValueOnce(appliedRows);
 
     const plan = await migrator.planDown({ count: 3, filter: { tags: ["seed"] } as any });
 
     // Head is v3[tagged], so we may roll back v3 only; stop before v2 (untagged)
     expect(plan.migrations.map(m => m.name)).toEqual(["three"]);
+    expect(ensureConn.ensureMigrationsTable).toHaveBeenCalledTimes(1);
+    expect(fetchConn.fetchAppliedMigrations).toHaveBeenCalledTimes(1);
 
     // If the head were untagged, expect empty
     // Simulate by flipping tag of v3 to undefined
   });
 });
-

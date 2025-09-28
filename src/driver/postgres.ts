@@ -127,12 +127,20 @@ class PostgresDriver implements Driver {
   private readonly pool: Pool;
   readonly supportsTransactionalDDL = true;
 
+  private readonly ownsPool: boolean;
+
   constructor(private readonly options: DriverOptions) {
-    const poolConfig: any = { connectionString: options.url };
-    if (options.connectTimeoutMs) {
-      poolConfig.connectionTimeoutMillis = options.connectTimeoutMs;
+    if (options.pool) {
+      this.pool = options.pool;
+      this.ownsPool = false;
+    } else {
+      const poolConfig: any = { connectionString: options.url };
+      if (options.connectTimeoutMs) {
+        poolConfig.connectionTimeoutMillis = options.connectTimeoutMs;
+      }
+      this.pool = new Pool(poolConfig);
+      this.ownsPool = true;
     }
-    this.pool = new Pool(poolConfig);
   }
 
   quoteIdent(identifier: string): string {
@@ -153,7 +161,9 @@ class PostgresDriver implements Driver {
   }
 
   async close(): Promise<void> {
-    await this.pool.end();
+    if (this.ownsPool) {
+      await this.pool.end();
+    }
   }
 
   mapError(error: unknown): Error {
