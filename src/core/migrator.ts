@@ -9,6 +9,7 @@ import { DriftError, MissingFileError, SqlError, ConnectionError, ChecksumMismat
 import { Planner, type PlanOptions, type MigrationPlan } from "./planner.js";
 import { matchesFilter, type TagFilter } from "./tags.js";
 import type { Config } from "../config.js";
+import type { Driver } from "../driver/types.js";
 import type { Pool } from "pg";
 import { logger } from "../utils/logger.js";
 import { emitEvent, previewSql } from "../utils/events.js";
@@ -60,13 +61,15 @@ export interface VerifyResult {
 export class Migrator {
   private pool: Pool;
   private config: Config;
+  private driver?: Driver;
   private migrationFileCache: Map<string, MigrationFile> = new Map();
   private cacheLastModified: Map<string, number> = new Map();
   private cacheLastSize: Map<string, number> = new Map();
 
-  constructor(config: Config, pool: Pool) {
+  constructor(config: Config, pool: Pool, driver?: Driver) {
     this.config = config;
     this.pool = pool;
+    this.driver = driver;
   }
 
   /**

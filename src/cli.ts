@@ -2,11 +2,11 @@ import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { Pool } from "pg";
 import { Migrator } from "./core/migrator.js";
 import { Planner } from "./core/planner.js";
 import { timestampedFilename, writeSqlTemplate, writeDefaultConfig, ConfigFormat } from "./core/files.js";
 import { resolveRuntimeConfig } from "./config.js";
+import { createDriver } from "./driver/factory.js";
 import { formatExitCodesHelp, ConnectionError, ParseConfigError, DriftError, MissingFileError } from "./core/errors.js";
 import type { Config } from "./config.js";
 import { logger } from "./utils/logger.js";
@@ -38,18 +38,6 @@ type PlanArgs = BaseArgs & {
   dryRun?: boolean;
 };
 
-function makePool(url: string): Pool {
-  const cfg: any = { connectionString: url };
-  const raw = process.env.NOMAD_PG_CONNECT_TIMEOUT_MS;
-  if (raw) {
-    const ms = parseInt(raw, 10);
-    if (!Number.isNaN(ms) && ms > 0) {
-      cfg.connectionTimeoutMillis = ms;
-    }
-  }
-  return new Pool(cfg);
-}
-
 async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promise<T>): Promise<T> {
   const runtime = resolveRuntimeConfig({
     cli: {
@@ -66,7 +54,15 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
     throw new Error("DATABASE_URL is not set (provide via --url, config file, or environment variable)");
   }
 
-  const pool = makePool(runtime.url);
+  const timeoutEnv = process.env.NOMAD_PG_CONNECT_TIMEOUT_MS;
+  let connectTimeout: number | undefined;
+  if (timeoutEnv) {
+    const ms = parseInt(timeoutEnv, 10);
+    if (!Number.isNaN(ms) && ms > 0) {
+      connectTimeout = ms;
+    }
+  }
+
   const config: Config = {
     driver: "postgres",
     url: runtime.url,
@@ -79,7 +75,10 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
     verbose: (args as any).verbose === true,
     eventsJson: (args as any)["events-json"] === true
   };
-  const migrator = new Migrator(config, pool);
+
+  const driver = createDriver(config, { connectTimeoutMs: connectTimeout });
+  const pool = driver.getPool();
+  const migrator = new Migrator(config, pool, driver);
 
   try {
     // Test connection before proceeding
@@ -117,7 +116,7 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
 
     return await fn(migrator);
   } finally {
-    await pool.end();
+    await driver.close();
   }
 }
 
