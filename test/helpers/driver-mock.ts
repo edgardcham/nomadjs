@@ -54,7 +54,7 @@ function createConnectionMock(overrides: Partial<DriverConnectionMock> = {}): Dr
   return connection as DriverConnectionMock;
 }
 
-export type DriverFlavor = "postgres" | "mysql";
+export type DriverFlavor = "postgres" | "mysql" | "sqlite";
 
 export interface DriverMockOptions {
   flavor?: DriverFlavor;
@@ -78,9 +78,11 @@ export function createDriverMock(options: DriverMockOptions = {}): DriverMock {
     quoteIdent: vi.fn<[string], string>(identifier =>
       flavor === "mysql" ? `\`${identifier}\`` : `"${identifier}"`
     ) as unknown as Driver["quoteIdent"],
-    nowExpression: vi.fn<[], string>(() =>
-      flavor === "mysql" ? "CURRENT_TIMESTAMP(3)" : "NOW()"
-    ) as unknown as Driver["nowExpression"],
+    nowExpression: vi.fn<[], string>(() => {
+      if (flavor === "mysql") return "CURRENT_TIMESTAMP(3)";
+      if (flavor === "sqlite") return "CURRENT_TIMESTAMP";
+      return "NOW()";
+    }) as unknown as Driver["nowExpression"],
     mapError: vi.fn<[unknown], Error>(error => (error instanceof Error ? error : new Error(String(error)))) as unknown as Driver["mapError"],
     probeConnection: vi.fn<[], Promise<void>>().mockResolvedValue(undefined) as unknown as Driver["probeConnection"],
     enqueueConnection(overrides: Partial<DriverConnectionMock> = {}) {

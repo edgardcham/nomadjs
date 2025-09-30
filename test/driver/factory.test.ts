@@ -4,6 +4,7 @@ import { createDriver } from "../../src/driver/factory.js";
 
 const createPostgresDriverMock = vi.fn();
 const createMySqlDriverMock = vi.fn();
+const createSqliteDriverMock = vi.fn();
 
 vi.mock("../../src/driver/postgres.js", () => ({
   createPostgresDriver: (...args: unknown[]) => createPostgresDriverMock(...args)
@@ -13,10 +14,15 @@ vi.mock("../../src/driver/mysql.js", () => ({
   createMySqlDriver: (...args: unknown[]) => createMySqlDriverMock(...args)
 }));
 
+vi.mock("../../src/driver/sqlite.js", () => ({
+  createSqliteDriver: (...args: unknown[]) => createSqliteDriverMock(...args)
+}));
+
 describe("driver factory", () => {
   beforeEach(() => {
     createPostgresDriverMock.mockReset();
     createMySqlDriverMock.mockReset();
+    createSqliteDriverMock.mockReset();
   });
 
   const baseConfig: Config = {
@@ -102,5 +108,27 @@ describe("driver factory", () => {
       connectTimeoutMs: 456
     });
     expect(createPostgresDriverMock).not.toHaveBeenCalled();
+  });
+
+  it("builds sqlite driver when configured", () => {
+    const driverStub = { probeConnection: vi.fn() } as any;
+    createSqliteDriverMock.mockReturnValue(driverStub);
+
+    const config: Config = {
+      ...baseConfig,
+      driver: "sqlite",
+      schema: undefined
+    };
+
+    const driver = createDriver(config, { connectTimeoutMs: 789 });
+
+    expect(driver).toBe(driverStub);
+    expect(createSqliteDriverMock).toHaveBeenCalledWith({
+      url: config.url,
+      table: config.table,
+      connectTimeoutMs: 789
+    });
+    expect(createPostgresDriverMock).not.toHaveBeenCalled();
+    expect(createMySqlDriverMock).not.toHaveBeenCalled();
   });
 });

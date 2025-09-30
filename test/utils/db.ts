@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-export function isDatabaseAvailable(url: string, nomadCmd: string, driver?: "postgres" | "mysql"): boolean {
+export function isDatabaseAvailable(url: string, nomadCmd: string, driver?: "postgres" | "mysql" | "sqlite"): boolean {
   const tempDirRoot = join(tmpdir(), "nomad-cli-db-check-");
   const tempDir = mkdtempSync(tempDirRoot);
   const tableName = `nomad_probe_${Date.now()}`;

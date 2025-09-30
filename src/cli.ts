@@ -39,10 +39,12 @@ type PlanArgs = BaseArgs & {
   dryRun?: boolean;
 };
 
-function resolveConnectTimeout(driver: "postgres" | "mysql"): number | undefined {
+function resolveConnectTimeout(driver: "postgres" | "mysql" | "sqlite"): number | undefined {
   const values = driver === "mysql"
     ? [process.env.NOMAD_MYSQL_CONNECT_TIMEOUT_MS, process.env.NOMAD_PG_CONNECT_TIMEOUT_MS]
-    : [process.env.NOMAD_PG_CONNECT_TIMEOUT_MS];
+    : driver === "sqlite"
+      ? [process.env.NOMAD_SQLITE_BUSY_TIMEOUT_MS, process.env.NOMAD_SQLITE_CONNECT_TIMEOUT_MS]
+      : [process.env.NOMAD_PG_CONNECT_TIMEOUT_MS];
 
   for (const value of values) {
     if (!value) continue;
@@ -106,7 +108,7 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
     .option("dir", { type: "string", default: "migrations", describe: "Migrations directory" })
     .option("table", { type: "string", describe: "Version table name" })
     .option("schema", { type: "string", describe: "Database schema (default: public)" })
-    .option("driver", { type: "string", choices: ["postgres", "mysql"], describe: "Database driver (default: postgres)" })
+    .option("driver", { type: "string", choices: ["postgres", "mysql", "sqlite"], describe: "Database driver (default: postgres)" })
     .option("config", { type: "string", describe: "Path to config file (nomad.toml or nomad.json)" })
     .option("allow-drift", { type: "boolean", describe: "Allow migrations with checksum mismatches (DANGEROUS)" })
     .option("auto-notx", { type: "boolean", describe: "Auto-disable transactions for hazardous operations" })

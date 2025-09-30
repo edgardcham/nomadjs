@@ -109,3 +109,32 @@ jobs:
           NOMAD_MYSQL_CONNECT_TIMEOUT_MS: "2000"
         run: npm test -- test/cli/mysql-integration.test.ts
 
+  sqlite-test:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [20, 22, 24]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Run SQLite tests
+        env:
+          NOMAD_DRIVER: sqlite
+          NOMAD_SQLITE_BUSY_TIMEOUT_MS: "2000"
+        run: npm test -- test/cli/sqlite-integration.test.ts test/driver/sqlite.test.ts test/driver/sqlite-path-resolution.test.ts
+

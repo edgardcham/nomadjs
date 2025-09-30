@@ -41,7 +41,7 @@ interface EnqueueOptions {
   executionOverrides?: Partial<Omit<DriverConnectionMock, "runStatement">>;
 }
 
-describe.each(["postgres", "mysql"] as const)("Migrator.redo() (%s)", (flavor) => {
+describe.each(["postgres", "mysql", "sqlite"] as const)("Migrator.redo() (%s)", (flavor) => {
   let config: Config;
   let driver: DriverMock;
   let migrator: Migrator;
@@ -53,7 +53,12 @@ describe.each(["postgres", "mysql"] as const)("Migrator.redo() (%s)", (flavor) =
 
     config = {
       driver: flavor,
-      url: flavor === "mysql" ? "mysql://localhost/test" : "postgresql://localhost/test",
+      url:
+        flavor === "postgres"
+          ? "postgresql://localhost/test"
+          : flavor === "mysql"
+            ? "mysql://localhost/test"
+            : "sqlite:///tmp/redo.sqlite",
       dir: "./migrations",
       table: "nomad_migrations",
       schema: flavor === "postgres" ? "public" : undefined,

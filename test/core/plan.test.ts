@@ -32,7 +32,7 @@ type AppliedRow = {
   rolledBackAt: Date | null;
 };
 
-describe.each(["postgres", "mysql"] as const)("Planner integration (%s)", (flavor) => {
+describe.each(["postgres", "mysql", "sqlite"] as const)("Planner integration (%s)", (flavor) => {
   let config: Config;
   let driver: DriverMock;
   let migrator: Migrator;
@@ -48,7 +48,12 @@ describe.each(["postgres", "mysql"] as const)("Planner integration (%s)", (flavo
 
     config = {
       driver: flavor,
-      url: flavor === "mysql" ? "mysql://test:test@localhost:3306/testdb" : "postgresql://test:test@localhost:5432/testdb",
+      url:
+        flavor === "postgres"
+          ? "postgresql://test:test@localhost:5432/testdb"
+          : flavor === "mysql"
+            ? "mysql://test:test@localhost:3306/testdb"
+            : "sqlite:///tmp/plan.sqlite",
       dir: "/test/migrations",
       table: "nomad_migrations",
       schema: flavor === "postgres" ? "public" : undefined,

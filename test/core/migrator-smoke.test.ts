@@ -33,7 +33,7 @@ function setupStubs() {
   vi.mocked(calculateChecksum).mockReturnValue("chk:create_users");
 }
 
-describe.each(["postgres", "mysql"] as const)("Migrator smoke (%s)", flavor => {
+describe.each(["postgres", "mysql", "sqlite"] as const)("Migrator smoke (%s)", flavor => {
   let config: Config;
   let driver: DriverMock;
   let migrator: Migrator;
@@ -43,7 +43,12 @@ describe.each(["postgres", "mysql"] as const)("Migrator smoke (%s)", flavor => {
 
     config = {
       driver: flavor,
-      url: flavor === "mysql" ? "mysql://localhost/test" : "postgresql://localhost/test",
+      url:
+        flavor === "postgres"
+          ? "postgresql://localhost/test"
+          : flavor === "mysql"
+            ? "mysql://localhost/test"
+            : "sqlite:///tmp/smoke.sqlite",
       dir: "/migrations",
       table: "nomad_migrations",
       schema: flavor === "postgres" ? "public" : undefined,
