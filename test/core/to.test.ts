@@ -33,7 +33,7 @@ vi.mock("../../src/core/files.js");
 vi.mock("../../src/parser/enhanced-parser.js");
 vi.mock("../../src/core/checksum.js");
 
-describe.each(["postgres", "mysql"] as const)("Migrator.to() (%s)", (flavor) => {
+describe.each(["postgres", "mysql", "sqlite"] as const)("Migrator.to() (%s)", (flavor) => {
   let config: Config;
   let driver: DriverMock;
   let migrator: Migrator;
@@ -49,7 +49,12 @@ describe.each(["postgres", "mysql"] as const)("Migrator.to() (%s)", (flavor) => 
 
     config = {
       driver: flavor,
-      url: flavor === "mysql" ? "mysql://test:test@localhost:3306/testdb" : "postgresql://test:test@localhost:5432/testdb",
+      url:
+        flavor === "postgres"
+          ? "postgresql://test:test@localhost:5432/testdb"
+          : flavor === "mysql"
+            ? "mysql://test:test@localhost:3306/testdb"
+            : "sqlite:///tmp/to.sqlite",
       dir: "/test/migrations",
       table: "nomad_migrations",
       schema: flavor === "postgres" ? "public" : undefined,

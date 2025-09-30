@@ -76,6 +76,33 @@ describe("resolveRuntimeConfig driver handling", () => {
     }
   });
 
+  it("infers sqlite driver from URL when unspecified", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "nomad-config-driver-sqlite-infer-"));
+    try {
+      const config = resolveRuntimeConfig({
+        cli: { url: "sqlite:///tmp/nomad.sqlite" },
+        cwd
+      });
+      expect((config as any).driver).toBe("sqlite");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to environment sqlite driver", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "nomad-config-driver-env-sqlite-"));
+    try {
+      process.env.NOMAD_DRIVER = "sqlite";
+      const config = resolveRuntimeConfig({
+        cli: { url: "sqlite:///tmp/env.sqlite" },
+        cwd
+      });
+      expect((config as any).driver).toBe("sqlite");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("throws when driver does not match URL scheme", () => {
     const cwd = mkdtempSync(join(tmpdir(), "nomad-config-driver-invalid-"));
     try {

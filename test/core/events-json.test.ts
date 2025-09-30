@@ -50,7 +50,7 @@ afterEach(() => {
   consoleLogSpy = undefined;
 });
 
-describe.each(["postgres", "mysql"] as const)("Events JSON (%s)", flavor => {
+describe.each(["postgres", "mysql", "sqlite"] as const)("Events JSON (%s)", flavor => {
   it("emits lock/apply/stmt/end events for up migrations", async () => {
     const migrations = [
       buildMigration("20240101010101", "create_users", [
@@ -217,7 +217,7 @@ describe.each(["postgres", "mysql"] as const)("Events JSON (%s)", flavor => {
   });
 });
 
-function setupTest(options: { migrations: TestMigration[]; flavor: "postgres" | "mysql" }) {
+function setupTest(options: { migrations: TestMigration[]; flavor: "postgres" | "mysql" | "sqlite" }) {
   const sorted = [...options.migrations].sort((a, b) => (a.version < b.version ? -1 : a.version > b.version ? 1 : 0));
   const byFile = new Map(sorted.map(m => [m.filepath, m]));
   const byVersion = new Map(sorted.map(m => [m.version, m]));
@@ -247,7 +247,12 @@ function setupTest(options: { migrations: TestMigration[]; flavor: "postgres" | 
   });
   const config: Config = {
     driver: options.flavor,
-    url: options.flavor === "mysql" ? "mysql://test@test/db" : "postgresql://test@test/db",
+    url:
+      options.flavor === "postgres"
+        ? "postgresql://test@test/db"
+        : options.flavor === "mysql"
+          ? "mysql://test@test/db"
+          : "sqlite:///tmp/events.sqlite",
     dir: MIG_DIR,
     table: "nomad_migrations",
     schema: options.flavor === "postgres" ? "public" : undefined,
@@ -286,7 +291,7 @@ function setupTest(options: { migrations: TestMigration[]; flavor: "postgres" | 
   };
 }
 
-function createStatefulDriver(flavor: "postgres" | "mysql", onStateChange: (rows: AppliedMigrationRow[]) => void): Driver & { __setAppliedRows(rows: AppliedMigrationRow[]): void } {
+function createStatefulDriver(flavor: "postgres" | "mysql" | "sqlite", onStateChange: (rows: AppliedMigrationRow[]) => void): Driver & { __setAppliedRows(rows: AppliedMigrationRow[]): void } {
   let appliedRows: AppliedMigrationRow[] = [];
 
   const createConnection = (): DriverConnection => {
@@ -330,8 +335,12 @@ function createStatefulDriver(flavor: "postgres" | "mysql", onStateChange: (rows
     supportsTransactionalDDL: flavor === "postgres",
     connect: vi.fn(async () => createConnection()),
     close: vi.fn().mockResolvedValue(undefined),
-    quoteIdent: vi.fn(identifier => flavor === "mysql" ? `\`${identifier}\`` : `"${identifier}"`),
-    nowExpression: vi.fn(() => flavor === "mysql" ? "CURRENT_TIMESTAMP(3)" : "NOW()"),
+    quoteIdent: vi.fn(identifier => (flavor === "mysql" ? `\`${identifier}\`` : `"${identifier}"`)),
+    nowExpression: vi.fn(() => {
+      if (flavor === "mysql") return "CURRENT_TIMESTAMP(3)";
+      if (flavor === "sqlite") return "CURRENT_TIMESTAMP";
+      return "NOW()";
+    }),
     mapError: vi.fn(error => (error instanceof Error ? error : new Error(String(error)))),
     probeConnection: vi.fn().mockResolvedValue(undefined),
     __setAppliedRows(rows: AppliedMigrationRow[]) {

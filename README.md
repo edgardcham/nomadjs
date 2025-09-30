@@ -5,13 +5,13 @@
 [![Node >= 20](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](#installation)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Production-ready SQL migration tool for Node.js with checksums, transaction control, and dual PostgreSQL/MySQL support.
+Production-ready SQL migration tool for Node.js with checksums, transaction control, and first-class PostgreSQL/MySQL/SQLite support.
 
 **Key Features:**
 - SHA-256 checksums for drift detection
 - Automatic transaction wrapping with hazard detection
 - Detects operations that can't run in transactions (CREATE INDEX CONCURRENTLY, etc.)
-- Dual drivers: PostgreSQL (advisory locks) and MySQL (named locks)
+- Triple drivers: PostgreSQL (advisory locks), MySQL (named locks), and SQLite via better-sqlite3 (file-backed)
 - Advanced PostgreSQL parsing (dollar quotes, E-strings, COPY blocks)
 - TOML/JSON configuration with env var substitution
 - 390+ tests across both drivers with comprehensive edge-case coverage
@@ -45,13 +45,14 @@ To unlink later, run `npm unlink --global nomadjs` and `npm unlink nomadjs` in a
 
 ## Database Prerequisites
 
-NomadJS ships with native drivers for both PostgreSQL and MySQL. Use the driver that matches your connection string, or set it explicitly with `--driver`, `NOMAD_DRIVER`, or in your config file.
+NomadJS ships with native drivers for PostgreSQL, MySQL, and SQLite. Use the driver that matches your connection string, or set it explicitly with `--driver`, `NOMAD_DRIVER`, or in your config file.
 
 - **PostgreSQL**: Uses advisory locks via `pg_try_advisory_lock`. Supports schemas (default `public`) and transactional DDL.
-- **MySQL (8.0+)**: Uses named locks via `GET_LOCK`. DDL executes outside transactions automatically (the driver reports `supportsTransactionalDDL = false`).
+- **MySQL (8.0+)**: Uses named locks via `GET_LOCK`. DDL executes outside transactions automatically (`supportsTransactionalDDL = false`).
+- **SQLite (3.39+)**: Uses a single file on disk (or `:memory:`). The driver coordinates access with an internal lock table and always executes outside transactions.
 
-- Create the target database yourself (Nomad will create only the version-tracking table).
-- For example, using the default `postgres` superuser:
+- For Postgres/MySQL, create the target database yourself (Nomad manages only the version-tracking table).
+- PostgreSQL example:
   ```bash
   psql -U postgres -d postgres -c "CREATE DATABASE nomaddb;"
   export DATABASE_URL="postgres://postgres@localhost/nomaddb"
@@ -61,15 +62,19 @@ NomadJS ships with native drivers for both PostgreSQL and MySQL. Use the driver 
   mysql -uroot -pnomad -e "CREATE DATABASE nomad_test;"
   export DATABASE_URL="mysql://root:nomad@localhost:3306/nomad_test"
   ```
+- SQLite example (database file is created automatically):
+  ```bash
+  export DATABASE_URL="sqlite:///$(pwd)/nomad.sqlite"
+  ```
 - Alternatively, pass `--url` to each command instead of exporting `DATABASE_URL`.
 
 ### Driver Selection
 
 Nomad chooses the database driver in this order:
-1. `--driver` CLI flag (`postgres` or `mysql`)
+1. `--driver` CLI flag (`postgres`, `mysql`, or `sqlite`)
 2. `NOMAD_DRIVER` environment variable
 3. `database.driver` field in `nomad.toml` / `nomad.json`
-4. URL scheme (`postgres://`, `mysql://`, etc.)
+4. URL scheme (`postgres://`, `mysql://`, `sqlite://`, `file:`, or `*.sqlite` path)
 5. Default: `postgres`
 
 Examples:
@@ -82,7 +87,10 @@ nomad status --driver mysql --url "mysql://root:nomad@localhost:3306/nomad_test"
 export NOMAD_DRIVER=mysql
 nomad up --url "mysql://root:nomad@localhost:3306/nomad_test"
 
-# Override back to Postgres for a single run
+# Switch to SQLite with an explicit file path
+nomad plan --driver sqlite --url "sqlite:///$(pwd)/nomad.sqlite"
+
+# Override back to Postgres
 nomad plan --driver postgres --url "postgres://postgres@localhost/nomaddb"
 ```
 
@@ -221,7 +229,7 @@ Place a `nomad.toml` or `nomad.json` next to your project to avoid repeating opt
 ```toml
 [database]
 url = "postgres://postgres@localhost/nomaddb"
-# driver = "postgres"            # optional: "postgres" or "mysql"
+# driver = "postgres"            # optional: "postgres", "mysql", or "sqlite"
 table = "nomad_db_version"
 
 [migrations]
@@ -233,6 +241,16 @@ dir = "./migrations"
 [database]
 driver = "mysql"
 url = "mysql://root:password@localhost:3306/nomad_test"
+
+[migrations]
+dir = "./migrations"
+```
+
+```toml
+# SQLite example
+[database]
+driver = "sqlite"
+url = "sqlite:///\${PWD}/nomad.sqlite"
 
 [migrations]
 dir = "./migrations"
@@ -420,11 +438,18 @@ Summary: 3 pass, 1 warn, 0 fail
 
 Warnings keep the exit code at 0 so you can surface issues without breaking CI. Use `nomad doctor --json` to capture machine-readable reports.
 
-Optional fast connection failure for unreachable hosts:
-- You can enable a short client connection timeout to fail fast in CI/integration tests when the database host is unreachable.
-- Configure via `NOMAD_PG_CONNECT_TIMEOUT_MS` (milliseconds), for example:
+Optional fast connection failure / busy timeouts:
+- **PostgreSQL**: set `NOMAD_PG_CONNECT_TIMEOUT_MS` (milliseconds) to abort quickly when hosts are unreachable.
   ```bash
   export NOMAD_PG_CONNECT_TIMEOUT_MS=3000
+  ```
+- **MySQL**: set `NOMAD_MYSQL_CONNECT_TIMEOUT_MS` to control the underlying driver connect timeout.
+  ```bash
+  export NOMAD_MYSQL_CONNECT_TIMEOUT_MS=5000
+  ```
+- **SQLite**: set `NOMAD_SQLITE_BUSY_TIMEOUT_MS` (milliseconds) to tune how long the driver waits on locked database files (default 5000).
+  ```bash
+  export NOMAD_SQLITE_BUSY_TIMEOUT_MS=2000
   ```
 
 ## Tag Filtering
@@ -494,8 +519,7 @@ Event types:
 Notes:
 - Events are emitted to stdout as one JSON object per line (NDJSON).
 - Human logs (including `--verbose`) remain colorized and readable.
-- Multi-database roadmap: Postgres driver in production, MySQL driver implementation landed (CLI wiring next),
-  full plan tracked in [MySQL_SUPPORT.md](MySQL_SUPPORT.md).
+- Multi-database roadmap: PostgreSQL, MySQL, and SQLite drivers ship today; future enhancements are tracked in [MySQL_SUPPORT.md](MySQL_SUPPORT.md) and [SQLite_SUPPORT.md](SQLite_SUPPORT.md).
 
 ## Error Reporting
 

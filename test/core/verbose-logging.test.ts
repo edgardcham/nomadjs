@@ -10,7 +10,7 @@ vi.mock("node:fs");
 vi.mock("../../src/core/files.js");
 vi.mock("../../src/parser/enhanced-parser.js");
 
-describe.each(["postgres", "mysql"] as const)("Verbose logging (%s)", flavor => {
+describe.each(["postgres", "mysql", "sqlite"] as const)("Verbose logging (%s)", flavor => {
   let migrator: Migrator;
   let listFilesMock: ReturnType<typeof vi.mocked>;
   let readFileMock: ReturnType<typeof vi.mocked>;
@@ -20,7 +20,12 @@ describe.each(["postgres", "mysql"] as const)("Verbose logging (%s)", flavor => 
 
   const config: Config = {
     driver: flavor,
-    url: flavor === "mysql" ? "mysql://test@test/db" : "postgresql://test@test/db",
+    url:
+      flavor === "postgres"
+        ? "postgresql://test@test/db"
+        : flavor === "mysql"
+          ? "mysql://test@test/db"
+          : "sqlite:///tmp/verbose.sqlite",
     dir: "/migrations",
     table: "nomad_migrations",
     schema: flavor === "postgres" ? "public" : undefined,

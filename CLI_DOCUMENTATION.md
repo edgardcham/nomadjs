@@ -27,14 +27,15 @@ NomadJS is a production-ready SQL migration tool for Node.js with checksums, tra
 
 ## Database Drivers
 
-Nomad ships with adapters for PostgreSQL (default) and MySQL. Switch between them via:
+Nomad ships with adapters for PostgreSQL (default), MySQL, and SQLite. Switch between them via:
 
-- CLI flag: `--driver postgres` or `--driver mysql`
-- Environment variable: `NOMAD_DRIVER=postgres|mysql`
+- CLI flag: `--driver postgres`, `--driver mysql`, or `--driver sqlite`
+- Environment variable: `NOMAD_DRIVER=postgres|mysql|sqlite`
 - Config file: `[database]
- driver = "mysql"`
+ driver = "sqlite"` (or whichever driver you prefer)
 
 When the MySQL driver is active, migrations run outside explicit transactions (MySQL auto-commits most DDL), tables use `DATETIME(3)` timestamps, and advisory locking relies on `GET_LOCK`/`RELEASE_LOCK`. Set `NOMAD_MYSQL_CONNECT_TIMEOUT_MS` (or `NOMAD_PG_CONNECT_TIMEOUT_MS`) if you need faster connection probes in CI environments.
+When the SQLite driver is active, migrations operate on a single database file (created automatically if it does not exist). All statements run outside explicit transactions and the driver coordinates locking via an internal mutex table. Adjust contention waits with `NOMAD_SQLITE_BUSY_TIMEOUT_MS` (milliseconds).
 
    - Multiple config sources (CLI > env > config file > defaults)
    - Supports TOML and JSON config files
@@ -49,14 +50,15 @@ When the MySQL driver is active, migrations run outside explicit transactions (M
 
 ## Database Drivers
 
-NomadJS bundles two native drivers:
+NomadJS bundles three native drivers:
 
 - **PostgreSQL** – Uses advisory locks via `pg_try_advisory_lock`, supports schemas (default `public`), and wraps DDL in transactions when possible.
 - **MySQL 8+** – Uses named locks via `GET_LOCK`, automatically runs DDL outside transactions, and stores timestamps with millisecond precision.
+- **SQLite 3.39+** – Uses [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) with a lock table (`nomad_lock`) to coordinate writers, stores timestamps as ISO 8601 text, and runs migrations outside explicit transactions for consistency. When the native module is unavailable, Nomad falls back to Node’s experimental `node:sqlite` runtime (emitting a warning).
 
-Driver selection priority: CLI `--driver` flag → `NOMAD_DRIVER` env var → config file `database.driver` → URL scheme (`postgres://`, `postgresql://`, `mysql://`, `mariadb://`) → default `postgres`.
+Driver selection priority: CLI `--driver` flag → `NOMAD_DRIVER` env var → config file `database.driver` → URL scheme (`postgres://`, `postgresql://`, `mysql://`, `mariadb://`, `sqlite://`, `file:`) → default `postgres`.
 
-Each driver also honours a dedicated connect-timeout env var (`NOMAD_PG_CONNECT_TIMEOUT_MS`, `NOMAD_MYSQL_CONNECT_TIMEOUT_MS`).
+Each driver also honours a dedicated timeout env var (`NOMAD_PG_CONNECT_TIMEOUT_MS`, `NOMAD_MYSQL_CONNECT_TIMEOUT_MS`, `NOMAD_SQLITE_BUSY_TIMEOUT_MS`).
 
 **Driver selection examples**:
 
@@ -84,7 +86,7 @@ nomad plan --driver postgres --url "postgres://postgres@localhost/nomaddb"
 
 These options can be supplied before any command:
 
-- `--driver <postgres|mysql>` – choose the database adapter (default: postgres)
+- `--driver <postgres|mysql|sqlite>` – choose the database adapter (default: postgres)
 - `--url <connectionString>` – override `DATABASE_URL`
 - `--dir <path>` – migration directory (default: `migrations`)
 - `--table <name>` – version tracking table (default: `nomad_migrations`)
@@ -96,7 +98,7 @@ These options can be supplied before any command:
 Environment counterparts: `NOMAD_DRIVER`, `DATABASE_URL`/`NOMAD_DATABASE_URL`, `MYSQL_URL`, `NOMAD_MIGRATIONS_DIR`, `NOMAD_DB_TABLE`, `NOMAD_ALLOW_DRIFT`, `NOMAD_AUTO_NOTX`, `NOMAD_EVENTS_JSON`, `NOMAD_VERBOSE`.
 
 
-Use `--driver postgres` or `--driver mysql` (or set `NOMAD_DRIVER`) to target the desired backend when your URL is ambiguous.
+Use `--driver postgres`, `--driver mysql`, or `--driver sqlite` (or set `NOMAD_DRIVER`) to target the desired backend when your URL is ambiguous.
 
 ### `nomad init-config [format]`
 Create a configuration file template.
@@ -119,7 +121,7 @@ nomad init-config json --output database.json
 # Database connection URL
 # Supports environment variable substitution
 url = "postgresql://user:password@localhost:5432/dbname"
-# driver = "postgres"  # optional: "postgres" or "mysql"
+# driver = "postgres"  # optional: "postgres", "mysql", or "sqlite"
 # Or use env vars:
 # url = "${DATABASE_URL}"
 # url = "postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"

@@ -16,7 +16,7 @@ export type NomadConfigFile = {
 };
 
 export type RuntimeConfig = {
-  driver: "postgres" | "mysql";
+  driver: "postgres" | "mysql" | "sqlite";
   url?: string;
   dir: string;
   table?: string;
@@ -24,7 +24,7 @@ export type RuntimeConfig = {
 };
 
 export interface Config {
-  driver: "postgres" | "mysql";
+  driver: "postgres" | "mysql" | "sqlite";
   url: string;
   dir: string;
   table?: string;
@@ -91,7 +91,7 @@ export function resolveRuntimeConfig(opts: ResolveConfigOptions): RuntimeConfig 
   const explicitDriver = normaliseDriver(driverValue);
   const inferredDriver = inferDriverFromUrl(url);
 
-  let driver: "postgres" | "mysql";
+  let driver: "postgres" | "mysql" | "sqlite";
   if (explicitDriver) {
     if (inferredDriver && inferredDriver !== explicitDriver) {
       throw new ParseConfigError(`Configured driver "${explicitDriver}" does not match URL scheme for ${url}`);
@@ -103,8 +103,12 @@ export function resolveRuntimeConfig(opts: ResolveConfigOptions): RuntimeConfig 
     driver = "postgres";
   }
 
-  if (!schema && driver === "postgres") {
-    schema = "public";
+  if (driver === "postgres") {
+    if (!schema) {
+      schema = "public";
+    }
+  } else {
+    schema = undefined;
   }
 
   return {
@@ -221,15 +225,16 @@ function normaliseConfigShape(input: unknown, filePath: string): NomadConfigFile
   return out;
 }
 
-function normaliseDriver(value?: string): "postgres" | "mysql" | undefined {
+function normaliseDriver(value?: string): "postgres" | "mysql" | "sqlite" | undefined {
   if (!value) return undefined;
   const normalised = value.trim().toLowerCase();
   if (normalised === "postgres" || normalised === "postgresql") return "postgres";
   if (normalised === "mysql" || normalised === "mariadb") return "mysql";
-  throw new ParseConfigError(`Unsupported driver "${value}" (expected "postgres" or "mysql")`);
+  if (normalised === "sqlite" || normalised === "sqlite3") return "sqlite";
+  throw new ParseConfigError(`Unsupported driver "${value}" (expected "postgres", "mysql", or "sqlite")`);
 }
 
-function inferDriverFromUrl(url?: string): "postgres" | "mysql" | undefined {
+function inferDriverFromUrl(url?: string): "postgres" | "mysql" | "sqlite" | undefined {
   if (!url) return undefined;
   const trimmed = url.trim().toLowerCase();
   if (trimmed.startsWith("postgres://") || trimmed.startsWith("postgresql://")) {
@@ -237,6 +242,15 @@ function inferDriverFromUrl(url?: string): "postgres" | "mysql" | undefined {
   }
   if (trimmed.startsWith("mysql://") || trimmed.startsWith("mariadb://")) {
     return "mysql";
+  }
+  if (trimmed.startsWith("sqlite:")) {
+    return "sqlite";
+  }
+  if (trimmed.startsWith("file:")) {
+    return "sqlite";
+  }
+  if (!trimmed.includes("://") && (trimmed.endsWith(".sqlite") || trimmed.endsWith(".db"))) {
+    return "sqlite";
   }
   return undefined;
 }
