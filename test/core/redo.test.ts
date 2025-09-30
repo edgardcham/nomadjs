@@ -322,7 +322,8 @@ describe.each(["postgres", "mysql"] as const)("Migrator.redo() (%s)", (flavor) =
 
       await migrator.redo();
 
-      expect(executionConn.acquireLock).toHaveBeenCalledWith(expect.any(String), config.lockTimeout);
+      // acquireLock is called with 5000ms per-attempt timeout, not the full config.lockTimeout
+      expect(executionConn.acquireLock).toHaveBeenCalledWith(expect.any(String), 5000);
       expect(executionConn.releaseLock).toHaveBeenCalledTimes(1);
     });
   });

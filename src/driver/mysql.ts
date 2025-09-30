@@ -100,7 +100,8 @@ class MySqlConnection implements DriverConnection {
     const [rows] = await this.connection.execute(`SELECT GET_LOCK(?, ?)`, [lockKey, seconds]);
     const firstRow = (Array.isArray(rows) ? rows[0] : undefined) as Record<string, any> | undefined;
     const value = extractScalar(firstRow);
-    return value === 1;
+    // MySQL returns '1' as string when bigNumberStrings is true
+    return value === 1 || value === '1';
   }
 
   async releaseLock(lockKey: string): Promise<void> {
@@ -150,7 +151,7 @@ class MySqlDriver implements Driver {
         charset: "UTF8MB4",
         timezone: "Z",
         connectTimeout: options.connectTimeoutMs,
-        namedPlaceholders: true,
+        namedPlaceholders: false,
         supportBigNumbers: true,
         bigNumberStrings: true
       });

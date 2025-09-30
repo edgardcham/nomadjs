@@ -124,7 +124,8 @@ export class Migrator {
     const maxDelay = 5000;
 
     while (true) {
-      const acquired = await connection.acquireLock(lockKey, timeout);
+      // Use a shorter timeout per attempt (5 seconds) to allow retry logic to work
+      const acquired = await connection.acquireLock(lockKey, 5000);
       if (acquired) break;
       if (Date.now() - start >= timeout) {
         throw new LockTimeoutError(timeout);

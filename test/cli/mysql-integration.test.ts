@@ -37,6 +37,7 @@ describeIfDb("CLI: MySQL integration", () => {
 
   beforeAll(async () => {
     connection = await mysql.createConnection(mysqlUrl);
+    await connection.query('SELECT RELEASE_ALL_LOCKS()');
     await connection.query('DROP TABLE IF EXISTS mysql_smoke_users');
   });
 
@@ -48,12 +49,26 @@ describeIfDb("CLI: MySQL integration", () => {
         await connection.query(`DROP TABLE IF EXISTS ${table}`);
       }
       await connection.query('DROP TABLE IF EXISTS mysql_smoke_users');
+      await connection.query('SELECT RELEASE_ALL_LOCKS()');
     } finally {
       await connection.end();
     }
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    // Kill any stuck nomad CLI processes from previous runs
+    try {
+      execSync('pkill -f "node dist/esm/cli.js"', { stdio: 'ignore' });
+    } catch {
+      // Ignore errors if no processes found
+    }
+
+    // Force release all locks
+    await connection.query('SELECT RELEASE_ALL_LOCKS()');
+
+    // Wait a moment for cleanup
+    await new Promise(resolve => setTimeout(resolve, 100));
+
     mkdirSync(testDir, { recursive: true });
   });
 
@@ -68,6 +83,7 @@ describeIfDb("CLI: MySQL integration", () => {
     }
     tablesUsed.clear();
     await connection.query('DROP TABLE IF EXISTS mysql_smoke_users');
+    await connection.query('SELECT RELEASE_ALL_LOCKS()');
   });
 
   function computeLockKey(table: string): string {
