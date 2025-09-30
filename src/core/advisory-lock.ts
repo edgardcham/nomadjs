@@ -70,7 +70,7 @@ export class AdvisoryLock {
         [this.lockKey]
       );
 
-      return result.rows[0]?.pg_try_advisory_lock === true;
+      return result?.rows?.[0]?.pg_try_advisory_lock === true;
     } catch (error) {
       // Re-throw connection errors
       throw error;
@@ -166,7 +166,7 @@ export class AdvisoryLock {
         [this.lockKey]
       );
 
-      return result.rows[0]?.pg_advisory_unlock === true;
+      return result?.rows?.[0]?.pg_advisory_unlock === true;
     } catch (error) {
       // Log error but don't throw - connection might be closed
       logger.error(`Error releasing advisory lock: ${(error as Error).message}`);
@@ -185,7 +185,7 @@ export class AdvisoryLock {
       [this.lockKey]
     );
 
-    const row = result.rows[0];
+    const row = result?.rows?.[0];
     if (!row || !row.locked) {
       return { isLocked: false };
     }

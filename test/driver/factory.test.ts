@@ -3,14 +3,20 @@ import type { Config } from "../../src/config.js";
 import { createDriver } from "../../src/driver/factory.js";
 
 const createPostgresDriverMock = vi.fn();
+const createMySqlDriverMock = vi.fn();
 
 vi.mock("../../src/driver/postgres.js", () => ({
   createPostgresDriver: (...args: unknown[]) => createPostgresDriverMock(...args)
 }));
 
+vi.mock("../../src/driver/mysql.js", () => ({
+  createMySqlDriver: (...args: unknown[]) => createMySqlDriverMock(...args)
+}));
+
 describe("driver factory", () => {
   beforeEach(() => {
     createPostgresDriverMock.mockReset();
+    createMySqlDriverMock.mockReset();
   });
 
   const baseConfig: Config = {
@@ -27,7 +33,7 @@ describe("driver factory", () => {
   };
 
   it("returns postgres driver by default", () => {
-    const driverStub = { getPool: vi.fn() } as any;
+    const driverStub = { probeConnection: vi.fn() } as any;
     createPostgresDriverMock.mockReturnValue(driverStub);
 
     const driver = createDriver(baseConfig);
@@ -42,7 +48,7 @@ describe("driver factory", () => {
   });
 
   it("passes through connect timeout option", () => {
-    const driverStub = { getPool: vi.fn() } as any;
+    const driverStub = { probeConnection: vi.fn() } as any;
     createPostgresDriverMock.mockReturnValue(driverStub);
 
     const driver = createDriver(baseConfig, { connectTimeoutMs: 1234 });
@@ -57,7 +63,7 @@ describe("driver factory", () => {
   });
 
   it("falls back to default table and schema when missing", () => {
-    const driverStub = { getPool: vi.fn() } as any;
+    const driverStub = { probeConnection: vi.fn() } as any;
     createPostgresDriverMock.mockReturnValue(driverStub);
 
     const config: Config = {
@@ -74,5 +80,27 @@ describe("driver factory", () => {
       schema: "public",
       connectTimeoutMs: undefined
     });
+  });
+
+  it("builds mysql driver when configured", () => {
+    const driverStub = { probeConnection: vi.fn() } as any;
+    createMySqlDriverMock.mockReturnValue(driverStub);
+
+    const config: Config = {
+      ...baseConfig,
+      driver: "mysql",
+      schema: undefined
+    };
+
+    const driver = createDriver(config, { connectTimeoutMs: 456 });
+
+    expect(driver).toBe(driverStub);
+    expect(createMySqlDriverMock).toHaveBeenCalledWith({
+      url: config.url,
+      table: config.table,
+      schema: config.schema,
+      connectTimeoutMs: 456
+    });
+    expect(createPostgresDriverMock).not.toHaveBeenCalled();
   });
 });

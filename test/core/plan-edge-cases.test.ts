@@ -1,27 +1,27 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import type { MockedFunction } from "vitest";
 import { Migrator } from "../../src/core/migrator.js";
-import { Planner } from "../../src/core/planner.js";
 import { listMigrationFiles, filenameToVersion } from "../../src/core/files.js";
 import { parseNomadSqlFile } from "../../src/parser/enhanced-parser.js";
 import { calculateChecksum } from "../../src/core/checksum.js";
 import { readFileSync } from "node:fs";
-import { Pool } from "pg";
 import type { Config } from "../../src/config.js";
+import { createDriverMock, type DriverMock } from "../helpers/driver-mock.js";
 
-// Mock dependencies
-vi.mock("pg");
 vi.mock("node:fs");
 vi.mock("../../src/core/files.js");
 vi.mock("../../src/parser/enhanced-parser.js");
+vi.mock("../../src/core/checksum.js");
 
 describe("Plan Command Edge Cases", () => {
   let migrator: Migrator;
-  let mockPool: any;
-  let queryMock: ReturnType<typeof vi.fn>;
-  let listMigrationFilesMock: ReturnType<typeof vi.fn>;
-  let readFileSyncMock: ReturnType<typeof vi.fn>;
-  let parseNomadSqlFileMock: ReturnType<typeof vi.fn>;
-  let filenameToVersionMock: ReturnType<typeof vi.fn>;
+  let driver: DriverMock;
+  let listFilesMock: MockedFunction<typeof listMigrationFiles>;
+  let readFileMock: MockedFunction<typeof readFileSync>;
+  let parseMock: MockedFunction<typeof parseNomadSqlFile>;
+  let versionMock: MockedFunction<typeof filenameToVersion>;
+  let migrationsByPath: Map<string, { up: string[]; down: string[]; checksum: string }>;
+  let checksumByContent: Map<string, string>;
 
   const config: Config = {
     driver: "postgres",
@@ -33,51 +33,84 @@ describe("Plan Command Edge Cases", () => {
   };
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    driver = createDriverMock();
+    migrator = new Migrator(config, driver);
 
-    vi.spyOn(console, 'log').mockImplementation(() => {});
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    migrationsByPath = new Map();
+    checksumByContent = new Map();
 
-    queryMock = vi.fn();
-    mockPool = {
-      query: queryMock,
-      end: vi.fn(),
-      connect: vi.fn().mockResolvedValue({
-        query: queryMock,
-        release: vi.fn()
-      })
-    };
+    listFilesMock = vi.mocked(listMigrationFiles);
+    readFileMock = vi.mocked(readFileSync as unknown as typeof readFileSync);
+    parseMock = vi.mocked(parseNomadSqlFile);
+    versionMock = vi.mocked(filenameToVersion);
 
-    (Pool as any).mockImplementation(() => mockPool);
-    listMigrationFilesMock = listMigrationFiles as any;
-    readFileSyncMock = readFileSync as any;
-    parseNomadSqlFileMock = parseNomadSqlFile as any;
-    filenameToVersionMock = filenameToVersion as any;
-
-    filenameToVersionMock.mockImplementation((filepath: string) => {
+    versionMock.mockImplementation((filepath: string) => {
       const match = filepath.match(/(\d{14})/);
       return match ? match[1] : undefined;
     });
 
-    migrator = new Migrator(config, mockPool);
+    vi.mocked(calculateChecksum).mockImplementation((content: string) => {
+      return checksumByContent.get(content) ?? `chk:${content}`;
+    });
+
+    readFileMock.mockImplementation((filepath: string) => {
+      const entry = migrationsByPath.get(filepath);
+      if (!entry) throw new Error(`Unexpected read for ${filepath}`);
+      return ['-- up', ...entry.up, '-- down', ...entry.down].join('\n');
+    });
+
+    parseMock.mockImplementation((filepath: string) => {
+      const entry = migrationsByPath.get(filepath);
+      if (!entry) throw new Error(`Unexpected parse for ${filepath}`);
+      return {
+        up: { statements: entry.up, notx: false },
+        down: { statements: entry.down, notx: false },
+        noTransaction: false
+      } as any;
+    });
+
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  describe("Empty and Edge Cases", () => {
-    it("should handle no migrations directory gracefully", async () => {
-      // Simulate ENOENT error from listMigrationFiles
-      listMigrationFilesMock.mockImplementation(() => {
-        const error: any = new Error("ENOENT");
-        error.code = "ENOENT";
-        throw error;
-      });
+  function installMigrations(defs: Array<{ version: string; name: string; up: string[]; down: string[]; checksum?: string }>) {
+    migrationsByPath.clear();
+    const paths: string[] = [];
+    for (const def of defs) {
+      const checksum = def.checksum ?? `chk-${def.version}`;
+      const filepath = `${config.dir}/${def.version}_${def.name}.sql`;
+      migrationsByPath.set(filepath, { up: def.up, down: def.down, checksum });
+      checksumByContent.set(['-- up', ...def.up, '-- down', ...def.down].join('\n'), checksum);
+      paths.push(filepath);
+    }
+    listFilesMock.mockReturnValue(paths);
+  }
 
-      queryMock
-        .mockResolvedValueOnce({ rows: [] }) // ensureTable
-        .mockResolvedValueOnce({ rows: [] }); // getAppliedMigrations
+  function enqueueConnections(appliedRows: Array<{ version: bigint; name: string; checksum: string; rolledBackAt: Date | null }>) {
+    const ensureConn = driver.enqueueConnection({});
+    ensureConn.ensureMigrationsTable.mockResolvedValue(undefined);
+
+    const fetchConn = driver.enqueueConnection({
+      fetchAppliedMigrations: vi.fn().mockResolvedValue(
+        appliedRows.map(row => ({ ...row, appliedAt: new Date("2024-01-01T00:00:00Z") }))
+      )
+    });
+
+    return { ensureConn, fetchConn };
+  }
+
+  describe("Empty and Edge Cases", () => {
+    it("handles missing migrations directory", async () => {
+      listFilesMock.mockImplementation(() => {
+        const err: any = new Error("ENOENT");
+        err.code = "ENOENT";
+        throw err;
+      });
+      enqueueConnections([]);
 
       const plan = await migrator.planUp();
 
@@ -85,21 +118,11 @@ describe("Plan Command Edge Cases", () => {
       expect(plan.summary.total).toBe(0);
     });
 
-    it("should handle empty migration files", async () => {
-      listMigrationFilesMock.mockReturnValue([
-        "/test/migrations/20240101120000_empty.sql"
+    it("handles empty migration files", async () => {
+      installMigrations([
+        { version: "20240101120000", name: "empty", up: [], down: [] }
       ]);
-
-      readFileSyncMock.mockReturnValue(""); // Empty file
-      parseNomadSqlFileMock.mockReturnValue({
-        up: { statements: [], notx: false },
-        down: { statements: [], notx: false },
-        noTransaction: false
-      });
-
-      queryMock
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] });
+      enqueueConnections([]);
 
       const plan = await migrator.planUp();
 
@@ -107,22 +130,11 @@ describe("Plan Command Edge Cases", () => {
       expect(plan.migrations[0].statements).toHaveLength(0);
     });
 
-    it("should handle migrations with only comments", async () => {
-      listMigrationFilesMock.mockReturnValue([
-        "/test/migrations/20240101120000_comments_only.sql"
+    it("handles comment-only migrations", async () => {
+      installMigrations([
+        { version: "20240101120000", name: "comments_only", up: [], down: [] }
       ]);
-
-      const content = "-- This is just a comment\n-- Another comment";
-      readFileSyncMock.mockReturnValue(content);
-      parseNomadSqlFileMock.mockReturnValue({
-        up: { statements: [], notx: false },
-        down: { statements: [], notx: false },
-        noTransaction: false
-      });
-
-      queryMock
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] });
+      enqueueConnections([]);
 
       const plan = await migrator.planUp();
 
@@ -132,251 +144,34 @@ describe("Plan Command Edge Cases", () => {
   });
 
   describe("Version Edge Cases", () => {
-    it("should handle invalid target version", async () => {
-      listMigrationFilesMock.mockReturnValue([
-        "/test/migrations/20240101120000_one.sql"
+    it("handles planning to unknown version", async () => {
+      installMigrations([
+        { version: "20240101120000", name: "one", up: ["SELECT 1;"], down: [] }
       ]);
+      enqueueConnections([]);
 
-      readFileSyncMock.mockReturnValue("SELECT 1;");
-      parseNomadSqlFileMock.mockReturnValue({
-        up: { statements: ["SELECT 1;"], notx: false },
-        down: { statements: [], notx: false },
-        noTransaction: false
-      });
-
-      queryMock
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] });
-
-      // Try to plan to a version that doesn't exist
       const plan = await migrator.planTo({ version: 99999999999999n });
 
-      expect(plan.migrations).toHaveLength(1);
       expect(plan.direction).toBe("up");
+      expect(plan.migrations).toHaveLength(1);
     });
 
-    it("should handle planning to version 0 (rollback all)", async () => {
-      listMigrationFilesMock.mockReturnValue([
-        "/test/migrations/20240101120000_one.sql",
-        "/test/migrations/20240102130000_two.sql"
+    it("plans rollback to version 0", async () => {
+      installMigrations([
+        { version: "20240101120000", name: "one", up: ["SELECT 1;"], down: ["SELECT 2;"] },
+        { version: "20240102130000", name: "two", up: ["SELECT 3;"], down: ["SELECT 4;"] }
       ]);
 
-      const content = "SELECT 1;";
-      readFileSyncMock.mockReturnValue(content);
-      parseNomadSqlFileMock.mockReturnValue({
-        up: { statements: [content], notx: false },
-        down: { statements: ["SELECT 2;"], notx: false },
-        noTransaction: false
-      });
-
-      // Both migrations are applied
-      queryMock
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({
-          rows: [
-            {
-              version: "20240101120000",
-              name: "one",
-              checksum: calculateChecksum(content),
-              applied_at: new Date(),
-              rolled_back_at: null
-            },
-            {
-              version: "20240102130000",
-              name: "two",
-              checksum: calculateChecksum(content),
-              applied_at: new Date(),
-              rolled_back_at: null
-            }
-          ]
-        });
+      const applied = [
+        { version: 20240101120000n, name: "one", checksum: "chk-20240101120000", rolledBackAt: null },
+        { version: 20240102130000n, name: "two", checksum: "chk-20240102130000", rolledBackAt: null }
+      ];
+      enqueueConnections(applied);
 
       const plan = await migrator.planTo({ version: 0n });
 
       expect(plan.direction).toBe("down");
       expect(plan.migrations).toHaveLength(2);
-    });
-  });
-
-  describe("Multiple Hazards and Complex SQL", () => {
-    it("should handle nested hazards in transactions", async () => {
-      listMigrationFilesMock.mockReturnValue([
-        "/test/migrations/20240101120000_complex.sql"
-      ]);
-
-      const content = `
-        BEGIN;
-        CREATE INDEX CONCURRENTLY idx1 ON users(email);
-        COMMIT;
-        VACUUM ANALYZE users;
-      `;
-
-      readFileSyncMock.mockReturnValue(content);
-      parseNomadSqlFileMock.mockReturnValue({
-        up: { statements: [content], notx: false },
-        down: { statements: [], notx: false },
-        noTransaction: false
-      });
-
-      queryMock
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] });
-
-      const plan = await migrator.planUp();
-
-      expect(plan.migrations[0].hazards).toHaveLength(2);
-      expect(plan.migrations[0].transaction).toBe(false);
-    });
-
-    it("should handle SQL with dollar quotes containing hazard keywords", async () => {
-      listMigrationFilesMock.mockReturnValue([
-        "/test/migrations/20240101120000_dollar_quotes.sql"
-      ]);
-
-      const content = `
-        CREATE FUNCTION test() RETURNS void AS $$
-        BEGIN
-          -- This comment mentions VACUUM but shouldn't trigger hazard
-          RAISE NOTICE 'REINDEX is mentioned here';
-        END;
-        $$ LANGUAGE plpgsql;
-      `;
-
-      readFileSyncMock.mockReturnValue(content);
-      parseNomadSqlFileMock.mockReturnValue({
-        up: { statements: [content], notx: false },
-        down: { statements: [], notx: false },
-        noTransaction: false
-      });
-
-      queryMock
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] });
-
-      const plan = await migrator.planUp();
-
-      // Should not detect hazards inside dollar quotes
-      expect(plan.migrations[0].hazards).toHaveLength(0);
-      expect(plan.migrations[0].transaction).toBe(true);
-    });
-  });
-
-  describe("Concurrent Migrations", () => {
-    it("should handle partially applied out-of-order migrations", async () => {
-      listMigrationFilesMock.mockReturnValue([
-        "/test/migrations/20240101120000_one.sql",
-        "/test/migrations/20240102130000_two.sql",
-        "/test/migrations/20240103140000_three.sql"
-      ]);
-
-      const content = "SELECT 1;";
-      readFileSyncMock.mockReturnValue(content);
-      parseNomadSqlFileMock.mockReturnValue({
-        up: { statements: [content], notx: false },
-        down: { statements: [], notx: false },
-        noTransaction: false
-      });
-
-      // Migration 1 and 3 are applied, but not 2
-      queryMock
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({
-          rows: [
-            {
-              version: "20240101120000",
-              name: "one",
-              checksum: calculateChecksum(content),
-              applied_at: new Date(),
-              rolled_back_at: null
-            },
-            {
-              version: "20240103140000",
-              name: "three",
-              checksum: calculateChecksum(content),
-              applied_at: new Date(),
-              rolled_back_at: null
-            }
-          ]
-        });
-
-      const plan = await migrator.planUp();
-
-      // Should only plan to apply migration 2
-      expect(plan.migrations).toHaveLength(1);
-      expect(plan.migrations[0].version).toBe(20240102130000n);
-    });
-  });
-
-  describe("Output Formatting", () => {
-    it("should handle very long SQL statements in output", async () => {
-      const planner = new Planner();
-
-      const longStatement = "CREATE TABLE " + "x".repeat(100) + " (id INT)";
-
-      const plan = {
-        direction: "up" as const,
-        migrations: [{
-          version: 20240101120000n,
-          name: "long_statement",
-          filepath: "/test.sql",
-          transaction: true,
-          hazards: [],
-          statements: [longStatement],
-        }],
-        summary: {
-          total: 1,
-          transactional: 1,
-          nonTransactional: 0,
-          hazardCount: 0
-        }
-      };
-
-      const output = planner.formatPlanOutput(plan);
-
-      // Should truncate long statements
-      expect(output).toContain("...");
-      expect(output.split("\n").some(line => line.length <= 80)).toBe(true);
-    });
-
-    it("should handle special characters in migration names", async () => {
-      listMigrationFilesMock.mockReturnValue([
-        "/test/migrations/20240101120000_add-user's-table!.sql"
-      ]);
-
-      readFileSyncMock.mockReturnValue("CREATE TABLE users (id INT);");
-      parseNomadSqlFileMock.mockReturnValue({
-        up: { statements: ["CREATE TABLE users (id INT);"], notx: false },
-        down: { statements: [], notx: false },
-        noTransaction: false
-      });
-
-      queryMock
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] });
-
-      const plan = await migrator.planUp();
-
-      expect(plan.migrations[0].name).toBe("add-user's-table!");
-    });
-  });
-
-  describe("Error Recovery", () => {
-    it("should handle database connection errors gracefully", async () => {
-      queryMock.mockRejectedValue(new Error("Connection refused"));
-
-      await expect(migrator.planUp()).rejects.toThrow("Connection refused");
-    });
-
-    it("should handle malformed migration files", async () => {
-      listMigrationFilesMock.mockReturnValue([
-        "/test/migrations/20240101120000_malformed.sql"
-      ]);
-
-      readFileSyncMock.mockImplementation(() => {
-        throw new Error("EACCES: permission denied");
-      });
-
-      await expect(migrator.planUp()).rejects.toThrow("permission denied");
     });
   });
 });

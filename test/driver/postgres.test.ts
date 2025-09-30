@@ -72,11 +72,21 @@ describe("Postgres driver", () => {
     expect(poolConfig.connectionTimeoutMillis).toBe(1234);
   });
 
-  it("exposes underlying pool", async () => {
+  it("probes connection via SELECT 1", async () => {
     const driver: any = createPostgresDriver({ url: "postgres://", table: "nomad_migrations", schema: "public" });
-    const pool = driver.getPool();
-    await pool.connect();
-    expect(connectSpy).toHaveBeenCalled();
+    mockClient.query.mockResolvedValue({ rows: [{ "?column?": 1 }] });
+
+    await driver.probeConnection();
+
+    expect(mockClient.query).toHaveBeenCalledWith("SELECT 1", undefined);
+  });
+
+  it("maps errors thrown during probe", async () => {
+    const driver: any = createPostgresDriver({ url: "postgres://", table: "nomad_migrations", schema: "public" });
+    const error = Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" });
+    mockClient.query.mockRejectedValue(error);
+
+    await expect(driver.probeConnection()).rejects.toBeInstanceOf(ConnectionError);
   });
 
   it("ensures migrations table with schema-qualified name", async () => {

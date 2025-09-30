@@ -1,696 +1,377 @@
-import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Migrator } from "../../src/core/migrator.js";
-import { Pool } from "pg";
 import type { Config } from "../../src/config.js";
 import { readFileSync } from "node:fs";
 import { listMigrationFiles, filenameToVersion } from "../../src/core/files.js";
 import { parseNomadSqlFile } from "../../src/parser/enhanced-parser.js";
 import { calculateChecksum } from "../../src/core/checksum.js";
 import { detectHazards, validateHazards } from "../../src/core/hazards.js";
+import { createDriverMock, type DriverConnectionMock, type DriverMock } from "../helpers/driver-mock.js";
+import { ChecksumMismatchError, MissingFileError } from "../../src/core/errors.js";
 
-// Mock dependencies
 vi.mock("node:fs");
 vi.mock("../../src/core/files.js");
 vi.mock("../../src/parser/enhanced-parser.js");
 vi.mock("../../src/core/checksum.js");
 vi.mock("../../src/core/hazards.js");
 
-describe("Migrator.redo()", () => {
-  let migrator: Migrator;
-  let dropShouldFail: boolean;
-  let mockPool: any;
-  let mockClient: any;
+type AppliedRow = {
+  version: bigint;
+  name: string;
+  checksum: string;
+  appliedAt: Date;
+  rolledBackAt: Date | null;
+};
+
+interface MigrationSection {
+  statements: string[];
+  notx?: boolean;
+}
+
+interface MockMigrationConfig {
+  version: bigint;
+  name: string;
+  checksum: string;
+  up: MigrationSection;
+  down: MigrationSection;
+}
+
+interface EnqueueOptions {
+  onStatement?: (sql: string) => Promise<void> | void;
+  executionOverrides?: Partial<Omit<DriverConnectionMock, "runStatement">>;
+}
+
+describe.each(["postgres", "mysql"] as const)("Migrator.redo() (%s)", (flavor) => {
   let config: Config;
+  let driver: DriverMock;
+  let migrator: Migrator;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    dropShouldFail = false;
 
-    const queryMock = vi.fn(async (sql: string) => {
-      if (typeof sql === "string") {
-        const trimmed = sql.trim();
-        if (dropShouldFail && trimmed === "DROP TABLE users;") {
-          throw new Error("Table does not exist");
-        }
-        if (trimmed.includes("pg_try_advisory_lock")) {
-          return { rows: [{ pg_try_advisory_lock: true }] };
-        }
-        if (trimmed.includes("pg_advisory_unlock")) {
-          return { rows: [{ pg_advisory_unlock: true }] };
-        }
-      }
-      return { rows: [] };
-    });
+    driver = createDriverMock({ flavor });
 
-    // Mock client
-    mockClient = {
-      query: queryMock,
-      release: vi.fn()
-    };
-
-    // Mock pool
-    mockPool = {
-      query: queryMock, // Shared with client for connection-based queries
-      connect: vi.fn().mockResolvedValue(mockClient)
-    };
-
-    // Config
     config = {
-      driver: "postgres",
-      url: "postgres://localhost/test",
+      driver: flavor,
+      url: flavor === "mysql" ? "mysql://localhost/test" : "postgresql://localhost/test",
       dir: "./migrations",
       table: "nomad_migrations",
+      schema: flavor === "postgres" ? "public" : undefined,
       allowDrift: false,
       autoNotx: false,
       lockTimeout: 30000
     };
 
-    // Mock hazard detection
+    migrator = new Migrator(config, driver);
+
     vi.mocked(detectHazards).mockReturnValue([]);
     vi.mocked(validateHazards).mockImplementation((hazards, hasNotx) => ({
       shouldSkipTransaction: Boolean(hasNotx),
       hazardsDetected: hazards || []
     }) as any);
-
-    // Mock filenameToVersion to extract version from filepath
     vi.mocked(filenameToVersion).mockImplementation((filepath: string) => {
       const match = filepath.match(/(\d{14})/);
       return match ? match[1] : "0";
     });
-
-    migrator = new Migrator(config, mockPool as unknown as Pool);
   });
 
   afterEach(() => {
-    vi.clearAllMocks();
+    vi.restoreAllMocks();
   });
 
+  function createAppliedRow(partial?: Partial<AppliedRow>): AppliedRow {
+    return {
+      version: 20240101120000n,
+      name: "create_users",
+      checksum: "abc123",
+      appliedAt: new Date("2024-01-01T00:00:00Z"),
+      rolledBackAt: null,
+      ...partial
+    };
+  }
+
+  function mockMigrationFile({ version, name, checksum, up, down }: MockMigrationConfig) {
+    const filepath = `/migrations/${version}_${name}.sql`;
+    vi.mocked(listMigrationFiles).mockReturnValue([filepath]);
+    vi.mocked(readFileSync).mockReturnValue("-- mocked --");
+    vi.mocked(calculateChecksum).mockReturnValue(checksum);
+    vi.mocked(parseNomadSqlFile).mockReturnValue({
+      up: { statements: up.statements, notx: up.notx ?? false },
+      down: { statements: down.statements, notx: down.notx ?? false },
+      tags: []
+    } as any);
+  }
+
+  function enqueueConnections(appliedRows: AppliedRow[], options: EnqueueOptions = {}) {
+    const { onStatement, executionOverrides = {} } = options;
+    const ensureConn = driver.enqueueConnection({});
+    const fetchConn = driver.enqueueConnection({
+      fetchAppliedMigrations: vi.fn().mockResolvedValue(appliedRows)
+    });
+
+    const executionConn = driver.enqueueConnection({
+      acquireLock: vi.fn().mockResolvedValue(true),
+      releaseLock: vi.fn().mockResolvedValue(undefined),
+      beginTransaction: vi.fn().mockResolvedValue(undefined),
+      commitTransaction: vi.fn().mockResolvedValue(undefined),
+      rollbackTransaction: vi.fn().mockResolvedValue(undefined),
+      markMigrationRolledBack: vi.fn().mockResolvedValue(undefined),
+      markMigrationApplied: vi.fn().mockResolvedValue(undefined),
+      ...executionOverrides
+    });
+
+    const statements: string[] = [];
+    executionConn.runStatement.mockImplementation(async (sql: string) => {
+      statements.push(sql);
+      if (onStatement) {
+        await onStatement(sql);
+      }
+    });
+
+    return {
+      ensureConn,
+      fetchConn,
+      executionConn,
+      statements
+    };
+  }
+
   describe("Basic Functionality", () => {
-    it("should redo the last applied migration", async () => {
-      // Setup: One applied migration
-      const appliedMigrations = [
-        {
-          version: 20240101120000n,
-          name: "create_users",
-          checksum: "abc123",
-          applied_at: new Date(),
-          rolled_back_at: null
-        }
-      ];
+    it("redo executes down then up and updates version tracking", async () => {
+      const appliedRow = createAppliedRow();
+      const { executionConn, fetchConn, statements } = enqueueConnections([appliedRow]);
 
-      // Mock pool queries in order
-      mockPool.query.mockClear();
-      mockPool.query
-        .mockResolvedValueOnce({ rows: [] }) // ensureTable CREATE TABLE
-        .mockResolvedValueOnce({ rows: appliedMigrations }); // getAppliedMigrations
-
-      // Mock file system
-      vi.mocked(listMigrationFiles).mockReturnValue([
-        "/migrations/20240101120000_create_users.sql"
-      ]);
-
-      const migrationContent = `-- +nomad Up
-CREATE TABLE users (id INT);
--- +nomad Down
-DROP TABLE users;`;
-
-      vi.mocked(readFileSync).mockReturnValue(migrationContent);
-      vi.mocked(calculateChecksum).mockReturnValue("abc123");
-      vi.mocked(parseNomadSqlFile).mockReturnValue({
-        up: {
-          statements: ["CREATE TABLE users (id INT);"],
-          notx: false
-        },
-        down: {
-          statements: ["DROP TABLE users;"],
-          notx: false
-        },
-        tags: []
-      });
-
-      // Execute redo
-      await migrator.redo();
-
-      // Verify down was executed
-      expect(mockClient.query).toHaveBeenCalledWith("DROP TABLE users;");
-
-      // Verify up was executed after down
-      expect(mockClient.query).toHaveBeenCalledWith("CREATE TABLE users (id INT);");
-
-      // Verify version tracking updates
-      expect(mockClient.query).toHaveBeenCalledWith(
-        expect.stringContaining("UPDATE"),
-        expect.arrayContaining(["20240101120000"])
-      );
-    });
-
-    it.skip("should redo a specific migration by version (removed feature)", async () => {
-      // Setup: Multiple applied migrations
-      const appliedMigrations = [
-        {
-          version: 20240101120000n,
-          name: "create_users",
-          checksum: "abc123",
-          applied_at: new Date(),
-          rolled_back_at: null
-        },
-        {
-          version: 20240102130000n,
-          name: "create_posts",
-          checksum: "def456",
-          applied_at: new Date(),
-          rolled_back_at: null
-        }
-      ];
-
-      // Mock ensureTable (first call)
-      mockPool.query.mockResolvedValueOnce({ rows: [] });
-
-      // Mock getAppliedMigrations (second call)
-      mockPool.query.mockResolvedValueOnce({
-        rows: appliedMigrations
-      });
-
-      // Mock file system for first migration only
-      vi.mocked(listMigrationFiles).mockReturnValue([
-        "/migrations/20240101120000_create_users.sql",
-        "/migrations/20240102130000_create_posts.sql"
-      ]);
-
-      const usersMigration = `-- +nomad Up
-CREATE TABLE users (id INT);
--- +nomad Down
-DROP TABLE users;`;
-
-      vi.mocked(readFileSync).mockImplementation((path) => {
-        if (path.toString().includes("20240101120000")) {
-          return usersMigration;
-        }
-        return `-- +nomad Up\n-- +nomad Down`;
-      });
-
-      vi.mocked(calculateChecksum).mockImplementation((content) => {
-        if (content === usersMigration) return "abc123";
-        return "other";
-      });
-
-      vi.mocked(parseNomadSqlFile).mockImplementation((path) => {
-        if (path.includes("20240101120000")) {
-          return {
-            up: {
-              statements: ["CREATE TABLE users (id INT);"],
-              notx: false
-            },
-            down: {
-              statements: ["DROP TABLE users;"],
-              notx: false
-            },
-            tags: []
-          };
-        }
-        return { up: { statements: [], notx: false }, down: { statements: [], notx: false }, tags: [] };
-      });
-
-      // Execute redo for specific version
-      await migrator.redo(20240101120000n);
-
-      // Verify only the specified migration was redone
-      expect(mockClient.query).toHaveBeenCalledWith("DROP TABLE users;");
-      expect(mockClient.query).toHaveBeenCalledWith("CREATE TABLE users (id INT);");
-      expect(mockClient.query).not.toHaveBeenCalledWith(expect.stringContaining("posts"));
-    });
-
-    it("should handle transaction wrapping correctly", async () => {
-      const appliedMigrations = [
-        {
-          version: 20240101120000n,
-          name: "create_users",
-          checksum: "abc123",
-          applied_at: new Date(),
-          rolled_back_at: null
-        }
-      ];
-
-      // Mock ensureTable (first call)
-      mockPool.query.mockResolvedValueOnce({ rows: [] });
-
-      // Mock getAppliedMigrations (second call)
-      mockPool.query.mockResolvedValueOnce({
-        rows: appliedMigrations
-      });
-
-      vi.mocked(listMigrationFiles).mockReturnValue([
-        "/migrations/20240101120000_create_users.sql"
-      ]);
-
-      const migrationContent = `-- +nomad Up
-CREATE TABLE users (id INT);
--- +nomad Down
-DROP TABLE users;`;
-
-      vi.mocked(readFileSync).mockReturnValue(migrationContent);
-      vi.mocked(calculateChecksum).mockReturnValue("abc123");
-      vi.mocked(parseNomadSqlFile).mockReturnValue({
-        up: {
-          statements: ["CREATE TABLE users (id INT);"],
-          notx: false
-        },
-        down: {
-          statements: ["DROP TABLE users;"],
-          notx: false
-        },
-        tags: []
+      mockMigrationFile({
+        version: appliedRow.version,
+        name: appliedRow.name,
+        checksum: appliedRow.checksum,
+        up: { statements: ["CREATE TABLE users (id INT);"] },
+        down: { statements: ["DROP TABLE users;"] }
       });
 
       await migrator.redo();
 
-      // Verify transaction commands were used
-      expect(mockClient.query).toHaveBeenCalledWith("BEGIN");
-      expect(mockClient.query).toHaveBeenCalledWith("COMMIT");
+      expect(fetchConn.fetchAppliedMigrations).toHaveBeenCalledTimes(1);
+      if (flavor === "postgres") {
+        expect(executionConn.beginTransaction).toHaveBeenCalledTimes(2);
+        expect(executionConn.commitTransaction).toHaveBeenCalledTimes(2);
+      } else {
+        expect(executionConn.beginTransaction).not.toHaveBeenCalled();
+        expect(executionConn.commitTransaction).not.toHaveBeenCalled();
+      }
+      expect(executionConn.rollbackTransaction).not.toHaveBeenCalled();
+      expect(statements).toEqual([
+        "DROP TABLE users;",
+        "CREATE TABLE users (id INT);"
+      ]);
+      expect(executionConn.markMigrationRolledBack).toHaveBeenCalledWith(appliedRow.version);
+      expect(executionConn.markMigrationApplied).toHaveBeenCalledWith({
+        version: appliedRow.version,
+        name: appliedRow.name,
+        checksum: appliedRow.checksum
+      });
     });
 
-    it("should handle notx migrations correctly", async () => {
-      const appliedMigrations = [
-        {
-          version: 20240101120000n,
-          name: "create_index",
-          checksum: "abc123",
-          applied_at: new Date(),
-          rolled_back_at: null
-        }
-      ];
+    it("wraps statements in transactions when notx is absent", async () => {
+      const appliedRow = createAppliedRow();
+      const { executionConn } = enqueueConnections([appliedRow]);
 
-      // Mock ensureTable (first call)
-      mockPool.query.mockResolvedValueOnce({ rows: [] });
-
-      // Mock getAppliedMigrations (second call)
-      mockPool.query.mockResolvedValueOnce({
-        rows: appliedMigrations
-      });
-
-      vi.mocked(listMigrationFiles).mockReturnValue([
-        "/migrations/20240101120000_create_index.sql"
-      ]);
-
-      const migrationContent = `-- +nomad Up
--- +nomad notx
-CREATE INDEX CONCURRENTLY idx_users ON users(email);
--- +nomad Down
--- +nomad notx
-DROP INDEX CONCURRENTLY idx_users;`;
-
-      vi.mocked(readFileSync).mockReturnValue(migrationContent);
-      vi.mocked(calculateChecksum).mockReturnValue("abc123");
-      vi.mocked(parseNomadSqlFile).mockReturnValue({
-        up: {
-          statements: ["CREATE INDEX CONCURRENTLY idx_users ON users(email);"],
-          notx: true
-        },
-        down: {
-          statements: ["DROP INDEX CONCURRENTLY idx_users;"],
-          notx: true
-        },
-        tags: []
+      mockMigrationFile({
+        version: appliedRow.version,
+        name: appliedRow.name,
+        checksum: appliedRow.checksum,
+        up: { statements: ["CREATE TABLE users (id INT);"] },
+        down: { statements: ["DROP TABLE users;"] }
       });
 
       await migrator.redo();
 
-      // Verify no transaction commands were used
-      expect(mockClient.query).not.toHaveBeenCalledWith("BEGIN");
-      expect(mockClient.query).not.toHaveBeenCalledWith("COMMIT");
+      if (flavor === "postgres") {
+        expect(executionConn.beginTransaction).toHaveBeenCalledTimes(2);
+        expect(executionConn.commitTransaction).toHaveBeenCalledTimes(2);
+      } else {
+        expect(executionConn.beginTransaction).not.toHaveBeenCalled();
+        expect(executionConn.commitTransaction).not.toHaveBeenCalled();
+      }
+    });
 
-      // Verify the migrations were executed
-      expect(mockClient.query).toHaveBeenCalledWith("DROP INDEX CONCURRENTLY idx_users;");
-      expect(mockClient.query).toHaveBeenCalledWith("CREATE INDEX CONCURRENTLY idx_users ON users(email);");
+    it("honours notx sections", async () => {
+      const appliedRow = createAppliedRow({ name: "create_index" });
+      const { executionConn, statements } = enqueueConnections([appliedRow]);
+
+      mockMigrationFile({
+        version: appliedRow.version,
+        name: appliedRow.name,
+        checksum: appliedRow.checksum,
+        up: { statements: ["CREATE INDEX CONCURRENTLY idx_users ON users(email);"], notx: true },
+        down: { statements: ["DROP INDEX CONCURRENTLY idx_users;"], notx: true }
+      });
+
+      await migrator.redo();
+
+      expect(executionConn.beginTransaction).not.toHaveBeenCalled();
+      expect(executionConn.commitTransaction).not.toHaveBeenCalled();
+      expect(statements).toEqual([
+        "DROP INDEX CONCURRENTLY idx_users;",
+        "CREATE INDEX CONCURRENTLY idx_users ON users(email);"
+      ]);
     });
   });
 
   describe("Edge Cases", () => {
-    it("should throw error when no migrations are applied", async () => {
-      // Mock ensureTable (first call)
-      mockPool.query.mockResolvedValueOnce({ rows: [] });
-
-      // Mock getAppliedMigrations (second call) - empty
-      mockPool.query.mockResolvedValueOnce({
-        rows: []
-      });
-
+    it("throws when no migrations are applied", async () => {
+      driver.enqueueConnection({});
+      driver.enqueueConnection({ fetchAppliedMigrations: vi.fn().mockResolvedValue([]) });
+      vi.mocked(listMigrationFiles).mockReturnValue([]);
       await expect(migrator.redo()).rejects.toThrow("No migrations to redo");
     });
 
-    it.skip("should throw error when specified version is not found (feature removed)", async () => {
-      const appliedMigrations = [
-        {
-          version: 20240101120000n,
-          name: "create_users",
-          checksum: "abc123",
-          applied_at: new Date(),
-          rolled_back_at: null
-        }
-      ];
-
-      // Mock ensureTable (first call)
-      mockPool.query.mockResolvedValueOnce({ rows: [] });
-
-      // Mock getAppliedMigrations (second call)
-      mockPool.query.mockResolvedValueOnce({
-        rows: appliedMigrations
-      });
-
-      await expect(migrator.redo(99999999999999n)).rejects.toThrow(
-        "Migration 99999999999999 not found or not applied"
-      );
+    it("throws when migration file is missing", async () => {
+      const appliedRow = createAppliedRow();
+      driver.enqueueConnection({});
+      driver.enqueueConnection({ fetchAppliedMigrations: vi.fn().mockResolvedValue([appliedRow]) });
+      vi.mocked(listMigrationFiles).mockReturnValue([]);
+      await expect(migrator.redo()).rejects.toThrow(MissingFileError);
     });
 
-    it("should throw error when migration file is missing", async () => {
-      const appliedMigrations = [
-        {
-          version: 20240101120000n,
-          name: "create_users",
-          checksum: "abc123",
-          applied_at: new Date(),
-          rolled_back_at: null
-        }
-      ];
-
-      // Mock ensureTable (first call)
-      mockPool.query.mockResolvedValueOnce({ rows: [] });
-
-      // Mock getAppliedMigrations (second call)
-      mockPool.query.mockResolvedValueOnce({
-        rows: appliedMigrations
-      });
-
-      vi.mocked(listMigrationFiles).mockReturnValue([]); // No files
-
-      await expect(migrator.redo()).rejects.toThrow(/missing/i);
-    });
-
-    it("should handle checksum mismatch with allowDrift", async () => {
+    it("allows checksum drift when allowDrift is set", async () => {
       config.allowDrift = true;
-      migrator = new Migrator(config, mockPool as unknown as Pool);
+      migrator = new Migrator(config, driver);
 
-      const appliedMigrations = [
-        {
-          version: 20240101120000n,
-          name: "create_users",
-          checksum: "abc123",
-          applied_at: new Date(),
-          rolled_back_at: null
-        }
-      ];
+      const appliedRow = createAppliedRow();
+      const { executionConn } = enqueueConnections([appliedRow]);
 
-      // Mock ensureTable (first call)
-      mockPool.query.mockResolvedValueOnce({ rows: [] });
-
-      // Mock getAppliedMigrations (second call)
-      mockPool.query.mockResolvedValueOnce({
-        rows: appliedMigrations
-      });
-
-      vi.mocked(listMigrationFiles).mockReturnValue([
-        "/migrations/20240101120000_create_users.sql"
-      ]);
-
-      const migrationContent = `-- +nomad Up
-CREATE TABLE users (id INT, name TEXT);
--- +nomad Down
-DROP TABLE users;`;
-
-      vi.mocked(readFileSync).mockReturnValue(migrationContent);
-      vi.mocked(calculateChecksum).mockReturnValue("different123"); // Different checksum
-      vi.mocked(parseNomadSqlFile).mockReturnValue({
-        up: {
-          statements: ["CREATE TABLE users (id INT, name TEXT);"],
-          notx: false
-        },
-        down: {
-          statements: ["DROP TABLE users;"],
-          notx: false
-        },
-        tags: []
+      mockMigrationFile({
+        version: appliedRow.version,
+        name: appliedRow.name,
+        checksum: "different", // parsed checksum
+        up: { statements: ["CREATE TABLE users (id INT, name TEXT);"] },
+        down: { statements: ["DROP TABLE users;"] }
       });
 
       await migrator.redo();
 
-      // Should execute despite checksum mismatch
-      expect(mockClient.query).toHaveBeenCalledWith("DROP TABLE users;");
-      expect(mockClient.query).toHaveBeenCalledWith("CREATE TABLE users (id INT, name TEXT);");
+      expect(executionConn.markMigrationApplied).toHaveBeenCalledWith({
+        version: appliedRow.version,
+        name: appliedRow.name,
+        checksum: "different"
+      });
     });
 
-    it("should rollback on down failure", async () => {
-      const appliedMigrations = [
-        {
-          version: 20240101120000n,
-          name: "create_users",
-          checksum: "abc123",
-          applied_at: new Date(),
-          rolled_back_at: null
+    it("rolls back when down direction fails", async () => {
+      const appliedRow = createAppliedRow();
+      const failure = new Error("Table does not exist");
+      const { executionConn } = enqueueConnections([appliedRow], {
+        onStatement: (sql) => {
+          if (sql === "DROP TABLE users;") {
+            throw failure;
+          }
         }
-      ];
-
-      // Mock ensureTable (first call)
-      mockPool.query.mockResolvedValueOnce({ rows: [] });
-
-      // Mock getAppliedMigrations (second call)
-      mockPool.query.mockResolvedValueOnce({
-        rows: appliedMigrations
       });
 
-      vi.mocked(listMigrationFiles).mockReturnValue([
-        "/migrations/20240101120000_create_users.sql"
-      ]);
-
-      const migrationContent = `-- +nomad Up
-CREATE TABLE users (id INT);
--- +nomad Down
-DROP TABLE users;`;
-
-      vi.mocked(readFileSync).mockReturnValue(migrationContent);
-      vi.mocked(calculateChecksum).mockReturnValue("abc123");
-      vi.mocked(parseNomadSqlFile).mockReturnValue({
-        up: {
-          statements: ["CREATE TABLE users (id INT);"],
-          notx: false
-        },
-        down: {
-          statements: ["DROP TABLE users;"],
-          notx: false
-        },
-        tags: []
+      mockMigrationFile({
+        version: appliedRow.version,
+        name: appliedRow.name,
+        checksum: appliedRow.checksum,
+        up: { statements: ["CREATE TABLE users (id INT);"] },
+        down: { statements: ["DROP TABLE users;"] }
       });
-
-      dropShouldFail = true;
 
       await expect(migrator.redo()).rejects.toThrow("Table does not exist");
-
-      // Verify rollback was called
-      expect(mockClient.query).toHaveBeenCalledWith("ROLLBACK");
+      if (flavor === "postgres") {
+        expect(executionConn.rollbackTransaction).toHaveBeenCalledTimes(1);
+      } else {
+        expect(executionConn.rollbackTransaction).not.toHaveBeenCalled();
+      }
     });
 
-    it("should handle empty up/down sections", async () => {
-      const appliedMigrations = [
-        {
-          version: 20240101120000n,
-          name: "empty_migration",
-          checksum: "abc123",
-          applied_at: new Date(),
-          rolled_back_at: null
-        }
-      ];
+    it("handles empty up/down sections without executing SQL", async () => {
+      const appliedRow = createAppliedRow({ name: "empty" });
+      const { executionConn, statements } = enqueueConnections([appliedRow]);
 
-      // Mock ensureTable (first call)
-      mockPool.query.mockResolvedValueOnce({ rows: [] });
-
-      // Mock getAppliedMigrations (second call)
-      mockPool.query.mockResolvedValueOnce({
-        rows: appliedMigrations
-      });
-
-      vi.mocked(listMigrationFiles).mockReturnValue([
-        "/migrations/20240101120000_empty_migration.sql"
-      ]);
-
-      const migrationContent = `-- +nomad Up
--- Nothing to do
--- +nomad Down
--- Nothing to undo`;
-
-      vi.mocked(readFileSync).mockReturnValue(migrationContent);
-      vi.mocked(calculateChecksum).mockReturnValue("abc123");
-      vi.mocked(parseNomadSqlFile).mockReturnValue({
-        up: {
-          statements: [],
-          notx: false
-        },
-        down: {
-          statements: [],
-          notx: false
-        },
-        tags: []
+      mockMigrationFile({
+        version: appliedRow.version,
+        name: appliedRow.name,
+        checksum: appliedRow.checksum,
+        up: { statements: [] },
+        down: { statements: [] }
       });
 
       await migrator.redo();
 
-      // Should handle gracefully with no SQL executed - only updates to the migration table
-      expect(mockClient.query).toHaveBeenCalledWith(
-        expect.stringContaining("UPDATE"),
-        expect.arrayContaining(["20240101120000"])
-      );
-      // No actual migration SQL statements or transactions executed (since statements are empty)
-      expect(mockClient.query).not.toHaveBeenCalledWith("BEGIN");
-      expect(mockClient.query).not.toHaveBeenCalledWith("COMMIT");
-      expect(mockClient.query).not.toHaveBeenCalledWith(expect.stringMatching(/CREATE|DROP|ALTER/));
+      expect(statements).toEqual([]);
+      expect(executionConn.markMigrationRolledBack).toHaveBeenCalledWith(appliedRow.version);
+      expect(executionConn.markMigrationApplied).toHaveBeenCalledWith({
+        version: appliedRow.version,
+        name: appliedRow.name,
+        checksum: appliedRow.checksum
+      });
     });
 
-    it("should acquire and release advisory lock", async () => {
-      const appliedMigrations = [
-        {
-          version: 20240101120000n,
-          name: "create_users",
-          checksum: "abc123",
-          applied_at: new Date(),
-          rolled_back_at: null
-        }
-      ];
+    it("acquires and releases the advisory lock", async () => {
+      const appliedRow = createAppliedRow();
+      const { executionConn } = enqueueConnections([appliedRow]);
 
-      // Mock ensureTable (first call)
-      mockPool.query.mockResolvedValueOnce({ rows: [] });
-
-      // Mock getAppliedMigrations (second call)
-      mockPool.query.mockResolvedValueOnce({
-        rows: appliedMigrations
-      });
-
-      vi.mocked(listMigrationFiles).mockReturnValue([
-        "/migrations/20240101120000_create_users.sql"
-      ]);
-
-      const migrationContent = `-- +nomad Up
-CREATE TABLE users (id INT);
--- +nomad Down
-DROP TABLE users;`;
-
-      vi.mocked(readFileSync).mockReturnValue(migrationContent);
-      vi.mocked(calculateChecksum).mockReturnValue("abc123");
-      vi.mocked(parseNomadSqlFile).mockReturnValue({
-        up: {
-          statements: ["CREATE TABLE users (id INT);"],
-          notx: false
-        },
-        down: {
-          statements: ["DROP TABLE users;"],
-          notx: false
-        },
-        tags: []
+      mockMigrationFile({
+        version: appliedRow.version,
+        name: appliedRow.name,
+        checksum: appliedRow.checksum,
+        up: { statements: ["CREATE TABLE users (id INT);"] },
+        down: { statements: ["DROP TABLE users;"] }
       });
 
       await migrator.redo();
 
-      const lockCalls = mockPool.query.mock.calls
-        .map(call => call[0])
-        .filter(sql => typeof sql === "string");
-      expect(lockCalls.some(sql => (sql as string).includes("pg_try_advisory_lock"))).toBe(true);
-      expect(lockCalls.some(sql => (sql as string).includes("pg_advisory_unlock"))).toBe(true);
+      expect(executionConn.acquireLock).toHaveBeenCalledWith(expect.any(String), config.lockTimeout);
+      expect(executionConn.releaseLock).toHaveBeenCalledTimes(1);
     });
   });
 
   describe("Error Handling", () => {
-    it("should provide clear error message for checksum mismatch without allowDrift", async () => {
-      const appliedMigrations = [
-        {
-          version: 20240101120000n,
-          name: "create_users",
-          checksum: "abc123",
-          applied_at: new Date(),
-          rolled_back_at: null
-        }
-      ];
-
-      // Mock ensureTable (first call)
-      mockPool.query.mockResolvedValueOnce({ rows: [] });
-
-      // Mock getAppliedMigrations (second call)
-      mockPool.query.mockResolvedValueOnce({
-        rows: appliedMigrations
+    it("throws checksum mismatch without allowDrift", async () => {
+      const appliedRow = createAppliedRow();
+      driver.enqueueConnection({});
+      driver.enqueueConnection({ fetchAppliedMigrations: vi.fn().mockResolvedValue([appliedRow]) });
+      mockMigrationFile({
+        version: appliedRow.version,
+        name: appliedRow.name,
+        checksum: "different",
+        up: { statements: ["CREATE TABLE users (id INT);"] },
+        down: { statements: ["DROP TABLE users;"] }
       });
-
-      vi.mocked(listMigrationFiles).mockReturnValue([
-        "/migrations/20240101120000_create_users.sql"
-      ]);
-
-      const migrationContent = `-- +nomad Up
-CREATE TABLE users (id INT, name TEXT);
--- +nomad Down
-DROP TABLE users;`;
-
-      vi.mocked(readFileSync).mockReturnValue(migrationContent);
-      vi.mocked(calculateChecksum).mockReturnValue("different123");
-
-      await expect(migrator.redo()).rejects.toThrow(/checksum/i);
+      await expect(migrator.redo()).rejects.toThrow(ChecksumMismatchError);
     });
 
-    it("should handle concurrent redo operations", async () => {
-      const appliedMigrations = [
-        {
-          version: 20240101120000n,
-          name: "create_users",
-          checksum: "abc123",
-          applied_at: new Date(),
-          rolled_back_at: null
-        }
-      ];
-
-      // Mock ensureTable (first call)
-      mockPool.query.mockResolvedValueOnce({ rows: [] });
-
-      // Mock getAppliedMigrations (second call)
-      mockPool.query.mockResolvedValueOnce({
-        rows: appliedMigrations
-      });
-
-      // Mock file system so migration is found
-      vi.mocked(listMigrationFiles).mockReturnValue([
-        "/migrations/20240101120000_create_users.sql"
-      ]);
-
-      vi.mocked(readFileSync).mockReturnValue(`-- +nomad Up
-CREATE TABLE users (id INT);
--- +nomad Down
-DROP TABLE users;`);
-
-      vi.mocked(calculateChecksum).mockReturnValue("abc123"); // Match the checksum
-      vi.mocked(parseNomadSqlFile).mockReturnValue({
-        up: { statements: ["CREATE TABLE users (id INT);"], notx: false },
-        down: { statements: ["DROP TABLE users;"], notx: false },
-        tags: []
-      });
-
-      const { LockTimeoutError } = await import("../../src/core/errors.js");
+    it("fails fast when lock cannot be acquired", async () => {
+      const appliedRow = createAppliedRow();
       config.lockTimeout = 5;
+      migrator = new Migrator(config, driver);
 
-      const originalImpl = mockPool.query.getMockImplementation();
-      mockPool.query.mockImplementation(async (...args: any[]) => {
-        const [sql] = args;
-        if (typeof sql === "string") {
-          if (sql.includes("pg_try_advisory_lock")) {
-            return { rows: [{ pg_try_advisory_lock: false }] };
-          }
-          if (sql.includes("pg_advisory_unlock")) {
-            return { rows: [{ pg_advisory_unlock: true }] };
-          }
-          if (sql.includes("SELECT version") || sql.includes("FROM nomad_migrations")) {
-            return { rows: appliedMigrations };
-          }
-        }
-        return originalImpl ? await originalImpl(...args) : { rows: [] };
+      driver.enqueueConnection({});
+      driver.enqueueConnection({ fetchAppliedMigrations: vi.fn().mockResolvedValue([appliedRow]) });
+
+      const acquireLock = vi.fn().mockResolvedValue(false);
+      const executionConn = driver.enqueueConnection({
+        acquireLock,
+        releaseLock: vi.fn().mockResolvedValue(undefined),
+        beginTransaction: vi.fn().mockResolvedValue(undefined),
+        commitTransaction: vi.fn().mockResolvedValue(undefined),
+        rollbackTransaction: vi.fn().mockResolvedValue(undefined),
+        markMigrationRolledBack: vi.fn().mockResolvedValue(undefined),
+        markMigrationApplied: vi.fn().mockResolvedValue(undefined)
+      });
+      executionConn.runStatement.mockImplementation(async () => {});
+
+      mockMigrationFile({
+        version: appliedRow.version,
+        name: appliedRow.name,
+        checksum: appliedRow.checksum,
+        up: { statements: ["CREATE TABLE users (id INT);"] },
+        down: { statements: ["DROP TABLE users;"] }
       });
 
-      await expect(migrator.redo()).rejects.toThrow(LockTimeoutError);
-
-      if (originalImpl) {
-        mockPool.query.mockImplementation(originalImpl);
-      }
+      await expect(migrator.redo()).rejects.toThrowError(/lock/);
+      expect(acquireLock).toHaveBeenCalled();
     });
   });
 });

@@ -8,6 +8,7 @@ export type NomadConfigFile = {
     url?: string;
     table?: string;
     schema?: string;
+    driver?: string;
   };
   migrations?: {
     dir?: string;
@@ -15,6 +16,7 @@ export type NomadConfigFile = {
 };
 
 export type RuntimeConfig = {
+  driver: "postgres" | "mysql";
   url?: string;
   dir: string;
   table?: string;
@@ -22,7 +24,7 @@ export type RuntimeConfig = {
 };
 
 export interface Config {
-  driver: "postgres";
+  driver: "postgres" | "mysql";
   url: string;
   dir: string;
   table?: string;
@@ -40,6 +42,7 @@ export type ResolveConfigOptions = {
     dir?: string;
     table?: string;
     schema?: string;
+    driver?: string;
   };
   cwd: string;
   configPath?: string;
@@ -61,14 +64,14 @@ export function resolveRuntimeConfig(opts: ResolveConfigOptions): RuntimeConfig 
   const envDir = process.env.NOMAD_MIGRATIONS_DIR;
   const envTable = process.env.NOMAD_DB_TABLE;
   const envSchema = process.env.NOMAD_DB_SCHEMA;
+  const envDriver = process.env.NOMAD_DRIVER;
 
-  // Get raw values first
   let url = opts.cli.url ?? envUrl ?? fileConfig?.database?.url;
   let dir = opts.cli.dir ?? envDir ?? fileConfig?.migrations?.dir ?? "migrations";
   let table = opts.cli.table ?? envTable ?? fileConfig?.database?.table;
-  let schema = opts.cli.schema ?? envSchema ?? fileConfig?.database?.schema ?? "public";
+  let schema = opts.cli.schema ?? envSchema ?? fileConfig?.database?.schema;
+  let driverValue = opts.cli.driver ?? envDriver ?? fileConfig?.database?.driver;
 
-  // Expand environment variables in all config values
   if (url) {
     url = expandEnvVars(url);
   }
@@ -81,8 +84,31 @@ export function resolveRuntimeConfig(opts: ResolveConfigOptions): RuntimeConfig 
   if (schema) {
     schema = expandEnvVars(schema);
   }
+  if (driverValue) {
+    driverValue = expandEnvVars(driverValue);
+  }
+
+  const explicitDriver = normaliseDriver(driverValue);
+  const inferredDriver = inferDriverFromUrl(url);
+
+  let driver: "postgres" | "mysql";
+  if (explicitDriver) {
+    if (inferredDriver && inferredDriver !== explicitDriver) {
+      throw new ParseConfigError(`Configured driver "${explicitDriver}" does not match URL scheme for ${url}`);
+    }
+    driver = explicitDriver;
+  } else if (inferredDriver) {
+    driver = inferredDriver;
+  } else {
+    driver = "postgres";
+  }
+
+  if (!schema && driver === "postgres") {
+    schema = "public";
+  }
 
   return {
+    driver,
     url,
     dir,
     table,
@@ -185,6 +211,7 @@ function normaliseConfigShape(input: unknown, filePath: string): NomadConfigFile
     if (typeof database.url === "string") out.database.url = database.url;
     if (typeof database.table === "string") out.database.table = database.table;
     if (typeof database.schema === "string") out.database.schema = database.schema;
+    if (typeof database.driver === "string") out.database.driver = database.driver;
   }
   const migrations = (input as any).migrations;
   if (migrations && typeof migrations === "object") {
@@ -192,6 +219,26 @@ function normaliseConfigShape(input: unknown, filePath: string): NomadConfigFile
     if (typeof migrations.dir === "string") out.migrations.dir = migrations.dir;
   }
   return out;
+}
+
+function normaliseDriver(value?: string): "postgres" | "mysql" | undefined {
+  if (!value) return undefined;
+  const normalised = value.trim().toLowerCase();
+  if (normalised === "postgres" || normalised === "postgresql") return "postgres";
+  if (normalised === "mysql" || normalised === "mariadb") return "mysql";
+  throw new ParseConfigError(`Unsupported driver "${value}" (expected "postgres" or "mysql")`);
+}
+
+function inferDriverFromUrl(url?: string): "postgres" | "mysql" | undefined {
+  if (!url) return undefined;
+  const trimmed = url.trim().toLowerCase();
+  if (trimmed.startsWith("postgres://") || trimmed.startsWith("postgresql://")) {
+    return "postgres";
+  }
+  if (trimmed.startsWith("mysql://") || trimmed.startsWith("mariadb://")) {
+    return "mysql";
+  }
+  return undefined;
 }
 
 function loadDotEnvIfPresent(cwd: string): void {

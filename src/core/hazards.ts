@@ -69,6 +69,22 @@ const HAZARD_PATTERNS: HazardPattern[] = [
   {
     type: "ALTER_TABLESPACE",
     pattern: /\bALTER\s+TABLESPACE\b/i
+  },
+  {
+    type: "LOCK_TABLES",
+    pattern: /\bLOCK\s+TABLES\b/i
+  },
+  {
+    type: "LOAD_DATA_INFILE",
+    pattern: /\bLOAD\s+DATA\s+(?:LOCAL\s+)?INFILE\b/i
+  },
+  {
+    type: "ALTER_TABLE_ALGORITHM",
+    pattern: /\bALTER\s+TABLE\b(?:(?!;).)*(?:\bALGORITHM\s*=\s*\w+|\bLOCK\s*=\s*\w+)/is
+  },
+  {
+    type: "TABLE_MAINTENANCE",
+    pattern: /\b(?:OPTIMIZE|ANALYZE|REPAIR)\s+TABLE\b/i
   }
 ];
 

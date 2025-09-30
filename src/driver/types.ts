@@ -1,10 +1,18 @@
-import type { Pool } from "pg";
+export interface PoolLike {
+  connect(): Promise<{
+    query(sql: string, params?: unknown[]): Promise<any>;
+    release(): Promise<void> | void;
+  }>;
+  query(sql: string, params?: unknown[]): Promise<any>;
+  end(): Promise<void> | void;
+}
+
 export interface DriverOptions {
   url: string;
   table: string;
   schema?: string;
   connectTimeoutMs?: number;
-  pool?: Pool;
+  pool?: PoolLike;
 }
 
 export interface AppliedMigrationRow {
@@ -25,16 +33,17 @@ export interface DriverConnection {
   beginTransaction(): Promise<void>;
   commitTransaction(): Promise<void>;
   rollbackTransaction(): Promise<void>;
+  query<T = unknown>(sql: string, params?: unknown[]): Promise<{ rows: T[] }>;
   runStatement(sql: string): Promise<void>;
   dispose(): Promise<void>;
 }
 
 export interface Driver {
-  getPool(): Pool;
   connect(): Promise<DriverConnection>;
   close(): Promise<void>;
   quoteIdent(identifier: string): string;
   nowExpression(): string;
   supportsTransactionalDDL: boolean;
   mapError(error: unknown): Error;
+  probeConnection(): Promise<void>;
 }

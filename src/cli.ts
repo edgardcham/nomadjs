@@ -18,6 +18,7 @@ type BaseArgs = {
   dir?: string;
   table?: string;
   schema?: string;
+  driver?: string;
   config?: string;
   allowDrift?: boolean;
   autoNotx?: boolean;
@@ -38,13 +39,29 @@ type PlanArgs = BaseArgs & {
   dryRun?: boolean;
 };
 
+function resolveConnectTimeout(driver: "postgres" | "mysql"): number | undefined {
+  const values = driver === "mysql"
+    ? [process.env.NOMAD_MYSQL_CONNECT_TIMEOUT_MS, process.env.NOMAD_PG_CONNECT_TIMEOUT_MS]
+    : [process.env.NOMAD_PG_CONNECT_TIMEOUT_MS];
+
+  for (const value of values) {
+    if (!value) continue;
+    const ms = parseInt(value, 10);
+    if (!Number.isNaN(ms) && ms > 0) {
+      return ms;
+    }
+  }
+  return undefined;
+}
+
 async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promise<T>): Promise<T> {
   const runtime = resolveRuntimeConfig({
     cli: {
       url: args.url,
       dir: args.dir,
       table: args.table,
-      schema: args.schema
+      schema: args.schema,
+      driver: args.driver
     },
     cwd: process.cwd(),
     configPath: args.config
@@ -54,17 +71,10 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
     throw new Error("DATABASE_URL is not set (provide via --url, config file, or environment variable)");
   }
 
-  const timeoutEnv = process.env.NOMAD_PG_CONNECT_TIMEOUT_MS;
-  let connectTimeout: number | undefined;
-  if (timeoutEnv) {
-    const ms = parseInt(timeoutEnv, 10);
-    if (!Number.isNaN(ms) && ms > 0) {
-      connectTimeout = ms;
-    }
-  }
+  const connectTimeout = resolveConnectTimeout(runtime.driver);
 
   const config: Config = {
-    driver: "postgres",
+    driver: runtime.driver,
     url: runtime.url,
     dir: runtime.dir,
     table: runtime.table,
@@ -77,43 +87,10 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
   };
 
   const driver = createDriver(config, { connectTimeoutMs: connectTimeout });
-  const pool = driver.getPool();
   const migrator = new Migrator(config, driver);
 
   try {
-    // Test connection before proceeding
-    try {
-      await pool.query('SELECT 1');
-    } catch (error: any) {
-      // Differentiate between different types of database errors
-      const message = error.message || "Failed to connect to database";
-
-      // Connection refused, network errors
-      if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND' ||
-          error.code === 'ETIMEDOUT' || error.code === 'ENETUNREACH') {
-        throw new ConnectionError(`Connection failed: ${message}`);
-      }
-
-      // Authentication errors
-      if (error.code === '28P01' || error.code === '28000' ||
-          message.includes('authentication') || message.includes('password')) {
-        throw new ConnectionError(`Authentication failed: ${message}`);
-      }
-
-      // Database doesn't exist
-      if (error.code === '3D000' || message.includes('does not exist')) {
-        throw new ConnectionError(`Database error: ${message}`);
-      }
-
-      // Invalid connection string
-      if (message.includes('invalid') || message.includes('malformed')) {
-        throw new ParseConfigError(`Invalid connection URL: ${message}`);
-      }
-
-      // Default to connection error for other cases
-      throw new ConnectionError(message);
-    }
-
+    await driver.probeConnection();
     return await fn(migrator);
   } finally {
     await driver.close();
@@ -129,6 +106,7 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
     .option("dir", { type: "string", default: "migrations", describe: "Migrations directory" })
     .option("table", { type: "string", describe: "Version table name" })
     .option("schema", { type: "string", describe: "Database schema (default: public)" })
+    .option("driver", { type: "string", choices: ["postgres", "mysql"], describe: "Database driver (default: postgres)" })
     .option("config", { type: "string", describe: "Path to config file (nomad.toml or nomad.json)" })
     .option("allow-drift", { type: "boolean", describe: "Allow migrations with checksum mismatches (DANGEROUS)" })
     .option("auto-notx", { type: "boolean", describe: "Auto-disable transactions for hazardous operations" })
@@ -348,7 +326,7 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
         }),
     async (argv) => {
       const runtime = resolveRuntimeConfig({
-        cli: { dir: argv.dir as string | undefined },
+        cli: { dir: argv.dir as string | undefined, driver: argv.driver as string | undefined },
         cwd: process.cwd(),
         configPath: argv.config as string | undefined
       });
@@ -416,7 +394,8 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
           url: argv.url as string | undefined,
           dir: argv.dir as string | undefined,
           table: argv.table as string | undefined,
-          schema: argv.schema as string | undefined
+          schema: argv.schema as string | undefined,
+          driver: argv.driver as string | undefined
         },
         cwd: process.cwd(),
         configPath: argv.config as string | undefined
@@ -426,17 +405,10 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
         throw new ParseConfigError("DATABASE_URL is not set (provide via --url, config file, or environment variable)");
       }
 
-      const timeoutEnv = process.env.NOMAD_PG_CONNECT_TIMEOUT_MS;
-      let connectTimeout: number | undefined;
-      if (timeoutEnv) {
-        const ms = parseInt(timeoutEnv, 10);
-        if (!Number.isNaN(ms) && ms > 0) {
-          connectTimeout = ms;
-        }
-      }
+      const connectTimeout = resolveConnectTimeout(runtime.driver);
 
       const config: Config = {
-        driver: "postgres",
+        driver: runtime.driver,
         url: runtime.url,
         dir: runtime.dir,
         table: runtime.table,
@@ -447,10 +419,9 @@ async function withMigrator<T>(args: BaseArgs, fn: (migrator: Migrator) => Promi
       };
 
       const driver = createDriver(config, { connectTimeoutMs: connectTimeout });
-      const pool = driver.getPool();
 
       try {
-        const report = await runDoctor(config, pool, { fix: argv.fix === true });
+        const report = await runDoctor(config, driver, { fix: argv.fix === true });
         const connectionFailure = report.checks.find(check => check.id === "connect" && check.status === "fail");
 
         if (argv.json) {

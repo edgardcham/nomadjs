@@ -1,6 +1,6 @@
 import { Pool } from "pg";
-import { ConnectionError, SqlError } from "../core/errors.js";
-import type { Driver, DriverOptions, DriverConnection, AppliedMigrationRow } from "./types.js";
+import { ConnectionError, ParseConfigError, SqlError } from "../core/errors.js";
+import type { Driver, DriverOptions, DriverConnection, AppliedMigrationRow, PoolLike } from "./types.js";
 
 function quoteIdent(identifier: string): string {
   return `"${identifier.replace(/"/g, '""')}"`;
@@ -25,9 +25,14 @@ function deriveLockKey(lockKeyHex: string): number {
   return (num % 2147483647) + 1;
 }
 
+type PoolClientLike = {
+  query(sql: string, params?: unknown[]): Promise<any>;
+  release(): Promise<void> | void;
+};
+
 class PostgresConnection implements DriverConnection {
   constructor(
-    private readonly client: any,
+    private readonly client: PoolClientLike,
     private readonly table: string,
     private readonly schema?: string
   ) {}
@@ -60,7 +65,13 @@ class PostgresConnection implements DriverConnection {
       []
     );
 
-    const rows: AppliedMigrationRow[] = (result.rows ?? []).map((row: { version: string | number; name: string; checksum: string; applied_at: string | Date | null; rolled_back_at: string | Date | null }): AppliedMigrationRow => ({
+    const rows: AppliedMigrationRow[] = (result.rows ?? []).map((row: {
+      version: string | number;
+      name: string;
+      checksum: string;
+      applied_at: string | Date | null;
+      rolled_back_at: string | Date | null;
+    }): AppliedMigrationRow => ({
       version: BigInt(row.version),
       name: row.name,
       checksum: row.checksum,
@@ -114,6 +125,11 @@ class PostgresConnection implements DriverConnection {
     await this.client.query("ROLLBACK");
   }
 
+  async query<T = unknown>(sql: string, params: unknown[] = []): Promise<{ rows: T[] }> {
+    const result = await this.client.query(sql, params);
+    return { rows: (result?.rows ?? []) as T[] };
+  }
+
   async runStatement(sql: string): Promise<void> {
     await this.client.query(sql);
   }
@@ -124,7 +140,7 @@ class PostgresConnection implements DriverConnection {
 }
 
 class PostgresDriver implements Driver {
-  private readonly pool: Pool;
+  private readonly pool: PoolLike;
   readonly supportsTransactionalDDL = true;
 
   private readonly ownsPool: boolean;
@@ -134,11 +150,12 @@ class PostgresDriver implements Driver {
       this.pool = options.pool;
       this.ownsPool = false;
     } else {
-      const poolConfig: any = { connectionString: options.url };
+      const poolConfig: Record<string, unknown> = { connectionString: options.url };
       if (options.connectTimeoutMs) {
         poolConfig.connectionTimeoutMillis = options.connectTimeoutMs;
       }
-      this.pool = new Pool(poolConfig);
+      const pool = new Pool(poolConfig);
+      this.pool = pool as unknown as PoolLike;
       this.ownsPool = true;
     }
   }
@@ -151,8 +168,12 @@ class PostgresDriver implements Driver {
     return nowExpression();
   }
 
-  getPool(): Pool {
-    return this.pool;
+  async probeConnection(): Promise<void> {
+    try {
+      await this.pool.query("SELECT 1");
+    } catch (error) {
+      throw this.mapError(error);
+    }
   }
 
   async connect(): Promise<DriverConnection> {
@@ -167,13 +188,23 @@ class PostgresDriver implements Driver {
   }
 
   mapError(error: unknown): Error {
-    if (error instanceof ConnectionError || error instanceof SqlError) {
+    if (error instanceof ConnectionError || error instanceof SqlError || error instanceof ParseConfigError) {
       return error;
     }
 
     const err = error as any;
     const message: string = err?.message || "Unknown database error";
     const code: string | undefined = err?.code;
+
+    const lowerMessage = typeof message === "string" ? message.toLowerCase() : "";
+    if (
+      err instanceof TypeError ||
+      lowerMessage.includes("invalid uri") ||
+      lowerMessage.includes("invalid connection string") ||
+      lowerMessage.includes("malformed")
+    ) {
+      return new ParseConfigError(`Invalid connection URL: ${message}`);
+    }
 
     if (code && ["ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "ENETUNREACH", "ECONNRESET"].includes(code)) {
       return new ConnectionError(`Connection failed: ${message}`);

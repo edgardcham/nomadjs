@@ -9,8 +9,7 @@ import { DriftError, MissingFileError, SqlError, ConnectionError, ChecksumMismat
 import { Planner, type PlanOptions, type MigrationPlan } from "./planner.js";
 import { matchesFilter, type TagFilter } from "./tags.js";
 import type { Config } from "../config.js";
-import type { Pool } from "pg";
-import type { Driver, DriverConnection } from "../driver/types.js";
+import type { Driver, DriverConnection, PoolLike } from "../driver/types.js";
 import { createPostgresDriver } from "../driver/postgres.js";
 import { logger } from "../utils/logger.js";
 import { emitEvent, previewSql } from "../utils/events.js";
@@ -59,20 +58,19 @@ export interface VerifyResult {
   }>;
 }
 
-function isDriver(value: Driver | Pool): value is Driver {
-  return typeof (value as Driver).getPool === "function" && typeof (value as Driver).connect === "function";
+function isDriver(value: Driver | PoolLike): value is Driver {
+  return typeof (value as Driver).connect === "function" && typeof (value as Driver).close === "function" && typeof (value as Driver).probeConnection === "function";
 }
 
 export class Migrator {
   private readonly config: Config;
   private readonly driver: Driver;
-  private readonly pool: Pool;
   private readonly lockKey: string;
   private migrationFileCache: Map<string, MigrationFile> = new Map();
   private cacheLastModified: Map<string, number> = new Map();
   private cacheLastSize: Map<string, number> = new Map();
 
-  constructor(config: Config, driverOrPool: Driver | Pool) {
+  constructor(config: Config, driverOrPool: Driver | PoolLike) {
     this.config = config;
 
     if (isDriver(driverOrPool)) {
@@ -89,7 +87,6 @@ export class Migrator {
       });
     }
 
-    this.pool = this.driver.getPool();
     this.lockKey = this.computeLockKey();
   }
 
@@ -141,18 +138,33 @@ export class Migrator {
       }
     };
 
-    const handler = async () => {
-      logger.warn("\nReceived interrupt signal, releasing migration lock...");
-      await release();
-      process.exit(130);
+    const signalHandlers: Array<{ signal: NodeJS.Signals; handler: () => Promise<void> }> = [];
+
+    const removeSignalHandlers = () => {
+      for (const { signal, handler } of signalHandlers) {
+        process.off(signal, handler);
+      }
+      signalHandlers.length = 0;
     };
 
-    process.on("SIGINT", handler);
-    process.on("SIGTERM", handler);
+    const registerSignalHandler = (signal: NodeJS.Signals) => {
+      const handler = async () => {
+        logger.warn("\nReceived interrupt signal, releasing migration lock...");
+        removeSignalHandlers();
+        await release();
+        if (typeof process.kill === "function") {
+          process.kill(process.pid, signal);
+        }
+      };
+      process.on(signal, handler);
+      signalHandlers.push({ signal, handler });
+    };
+
+    registerSignalHandler("SIGINT");
+    registerSignalHandler("SIGTERM");
 
     return async () => {
-      process.off("SIGINT", handler);
-      process.off("SIGTERM", handler);
+      removeSignalHandlers();
       await release();
     };
   }
@@ -501,7 +513,7 @@ export class Migrator {
       }
     }
 
-    const planner = new Planner(this.config.autoNotx);
+    const planner = new Planner(this.config.autoNotx === true, this.driver.supportsTransactionalDDL);
     const plan = planner.planUp(pending, options);
     if (warnings.length > 0 && plan.summary.warnings) {
       plan.summary.warnings.push(...warnings);
@@ -563,7 +575,7 @@ export class Migrator {
       }
     }
 
-    const planner = new Planner(this.config.autoNotx);
+    const planner = new Planner(this.config.autoNotx === true, this.driver.supportsTransactionalDDL);
     const limited = typeof options.count === "number" ? toRollback.slice(0, Math.max(options.count, 0)) : toRollback;
     const plan = planner.planDown(limited, options);
 
@@ -597,7 +609,7 @@ export class Migrator {
         .map(a => a.version.toString())
     );
 
-    const planner = new Planner(this.config.autoNotx);
+    const planner = new Planner(this.config.autoNotx === true, this.driver.supportsTransactionalDDL);
     return planner.planTo(files, appliedVersions, options.version, options);
   }
 
@@ -649,7 +661,7 @@ export class Migrator {
         }
       }
 
-      const planner = new Planner(this.config.autoNotx);
+      const planner = new Planner(this.config.autoNotx === true, this.driver.supportsTransactionalDDL);
       const plan = planner.planTo(files, appliedVersions, targetVersion, {});
 
       if (plan.migrations.length === 0) {
@@ -958,7 +970,7 @@ export class Migrator {
       logger: (msg) => logger.warn(`⚠️  ${msg}`)
     });
 
-    const shouldTx = !validation.shouldSkipTransaction;
+    const shouldTx = this.driver.supportsTransactionalDDL && !validation.shouldSkipTransaction;
     const total = migration.parsed.up.statements.length;
     const startedAt = Date.now();
 
@@ -1033,7 +1045,7 @@ export class Migrator {
       logger: (msg) => logger.warn(`⚠️  ${msg}`)
     });
 
-    const shouldTx = !validation.shouldSkipTransaction;
+    const shouldTx = this.driver.supportsTransactionalDDL && !validation.shouldSkipTransaction;
     const total = migration.parsed.down.statements.length;
     const startedAt = Date.now();
 

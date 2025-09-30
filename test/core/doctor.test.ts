@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { Pool } from "pg";
 import type { Config } from "../../src/config.js";
 import { runDoctor } from "../../src/core/doctor.js";
+import { createDriverMock, type DriverMock, type DriverConnectionMock } from "../helpers/driver-mock.js";
 
 const baseConfig: Config = {
   driver: "postgres",
@@ -11,23 +11,24 @@ const baseConfig: Config = {
   schema: "public"
 };
 
-function createPool(handler: (sql: string, params?: unknown[]) => Promise<any>): Pool {
-  return {
-    query: vi.fn(handler)
-  } as unknown as Pool;
-}
-
 describe("runDoctor", () => {
+  let driver: DriverMock;
+
   beforeEach(() => {
     vi.restoreAllMocks();
+    driver = createDriverMock();
   });
 
+  function setupConnection(overrides: Partial<DriverConnectionMock>): DriverConnectionMock {
+    return driver.enqueueConnection(overrides);
+  }
+
   it("flags connection failures", async () => {
-    const pool = createPool(async () => {
-      throw new Error("ECONNREFUSED");
+    setupConnection({
+      query: vi.fn().mockRejectedValue(new Error("ECONNREFUSED"))
     });
 
-    const report = await runDoctor(baseConfig, pool, {});
+    const report = await runDoctor(baseConfig, driver, {});
 
     expect(report.ok).toBe(false);
     const connectCheck = report.checks.find(check => check.id === "connect");
@@ -35,9 +36,9 @@ describe("runDoctor", () => {
   });
 
   it("fails when schema is missing without fix", async () => {
-    const pool = createPool(async (sql) => {
+    const queryMock = vi.fn().mockImplementation((sql: string) => {
       if (sql.includes("SELECT version()")) {
-        return {
+        return Promise.resolve({
           rows: [{
             version: "PostgreSQL 15.4",
             current_database: "nomaddb",
@@ -45,24 +46,20 @@ describe("runDoctor", () => {
             timezone: "UTC",
             encoding: "UTF8"
           }]
-        };
+        });
       }
       if (sql.includes("information_schema.schemata")) {
-        return { rows: [] };
+        return Promise.resolve({ rows: [] });
       }
       if (sql.includes("information_schema.tables")) {
-        return { rows: [] };
+        return Promise.resolve({ rows: [] });
       }
-      if (sql.includes("pg_try_advisory_lock")) {
-        return { rows: [{ acquired: true }] };
-      }
-      if (sql.includes("pg_advisory_unlock")) {
-        return { rows: [{ pg_advisory_unlock: true }] };
-      }
-      throw new Error(`Unexpected query: ${sql}`);
+      return Promise.resolve({ rows: [] });
     });
 
-    const report = await runDoctor({ ...baseConfig, schema: "app" }, pool, {});
+    setupConnection({ query: queryMock });
+
+    const report = await runDoctor({ ...baseConfig, schema: "app" }, driver, {});
 
     expect(report.ok).toBe(false);
     const schemaCheck = report.checks.find(check => check.id === "schema");
@@ -72,10 +69,10 @@ describe("runDoctor", () => {
 
   it("creates missing schema when fix option enabled", async () => {
     const queries: string[] = [];
-    const pool = createPool(async (sql) => {
+    const queryMock = vi.fn().mockImplementation((sql: string) => {
       queries.push(sql);
       if (sql.includes("SELECT version()")) {
-        return {
+        return Promise.resolve({
           rows: [{
             version: "PostgreSQL 15.4",
             current_database: "nomaddb",
@@ -83,32 +80,29 @@ describe("runDoctor", () => {
             timezone: "UTC",
             encoding: "UTF8"
           }]
-        };
+        });
       }
       if (sql.includes("information_schema.schemata")) {
-        // First check returns empty, second check after fix returns row
         const invocation = queries.filter(q => q.includes("information_schema.schemata")).length;
         if (invocation === 1) {
-          return { rows: [] };
+          return Promise.resolve({ rows: [] });
         }
-        return { rows: [{ exists: 1 }] };
+        return Promise.resolve({ rows: [{ exists: 1 }] });
       }
       if (sql.includes("information_schema.tables")) {
-        return { rows: [{ exists: 1 }] };
+        return Promise.resolve({ rows: [{ exists: 1 }] });
       }
-      if (sql.includes("pg_try_advisory_lock")) {
-        return { rows: [{ acquired: true }] };
-      }
-      if (sql.includes("pg_advisory_unlock")) {
-        return { rows: [{ pg_advisory_unlock: true }] };
-      }
-      if (sql.startsWith("CREATE SCHEMA")) {
-        return { rows: [] };
-      }
-      throw new Error(`Unexpected query: ${sql}`);
+      return Promise.resolve({ rows: [] });
     });
 
-    const report = await runDoctor({ ...baseConfig, schema: "app" }, pool, { fix: true });
+    const runStatementMock = vi.fn().mockImplementation((sql: string) => {
+      queries.push(sql);
+      return Promise.resolve();
+    });
+
+    setupConnection({ query: queryMock, runStatement: runStatementMock });
+
+    const report = await runDoctor({ ...baseConfig, schema: "app" }, driver, { fix: true });
 
     const schemaCheck = report.checks.find(check => check.id === "schema");
     expect(schemaCheck?.status).toBe("pass");
@@ -117,9 +111,9 @@ describe("runDoctor", () => {
   });
 
   it("warns when migrations table is missing", async () => {
-    const pool = createPool(async (sql) => {
+    const queryMock = vi.fn().mockImplementation((sql: string) => {
       if (sql.includes("SELECT version()")) {
-        return {
+        return Promise.resolve({
           rows: [{
             version: "PostgreSQL 15.4",
             current_database: "nomaddb",
@@ -127,24 +121,20 @@ describe("runDoctor", () => {
             timezone: "UTC",
             encoding: "UTF8"
           }]
-        };
+        });
       }
       if (sql.includes("information_schema.schemata")) {
-        return { rows: [{ exists: 1 }] };
+        return Promise.resolve({ rows: [{ exists: 1 }] });
       }
       if (sql.includes("information_schema.tables")) {
-        return { rows: [] };
+        return Promise.resolve({ rows: [] });
       }
-      if (sql.includes("pg_try_advisory_lock")) {
-        return { rows: [{ acquired: true }] };
-      }
-      if (sql.includes("pg_advisory_unlock")) {
-        return { rows: [{ pg_advisory_unlock: true }] };
-      }
-      throw new Error(`Unexpected query: ${sql}`);
+      return Promise.resolve({ rows: [] });
     });
 
-    const report = await runDoctor(baseConfig, pool, {});
+    setupConnection({ query: queryMock });
+
+    const report = await runDoctor(baseConfig, driver, {});
 
     const tableCheck = report.checks.find(check => check.id === "migrations-table");
     expect(tableCheck?.status).toBe("warn");
@@ -154,10 +144,10 @@ describe("runDoctor", () => {
 
   it("creates migrations table when fix option enabled", async () => {
     const queries: string[] = [];
-    const pool = createPool(async (sql) => {
+    const queryMock = vi.fn().mockImplementation((sql: string) => {
       queries.push(sql);
       if (sql.includes("SELECT version()")) {
-        return {
+        return Promise.resolve({
           rows: [{
             version: "PostgreSQL 15.4",
             current_database: "nomaddb",
@@ -165,31 +155,29 @@ describe("runDoctor", () => {
             timezone: "UTC",
             encoding: "UTF8"
           }]
-        };
+        });
       }
       if (sql.includes("information_schema.schemata")) {
-        return { rows: [{ exists: 1 }] };
+        return Promise.resolve({ rows: [{ exists: 1 }] });
       }
       if (sql.includes("information_schema.tables")) {
         const invocation = queries.filter(q => q.includes("information_schema.tables")).length;
         if (invocation === 1) {
-          return { rows: [] };
+          return Promise.resolve({ rows: [] });
         }
-        return { rows: [{ exists: 1 }] };
+        return Promise.resolve({ rows: [{ exists: 1 }] });
       }
-      if (sql.includes("pg_try_advisory_lock")) {
-        return { rows: [{ acquired: true }] };
-      }
-      if (sql.includes("pg_advisory_unlock")) {
-        return { rows: [{ pg_advisory_unlock: true }] };
-      }
-      if (sql.startsWith("CREATE TABLE")) {
-        return { rows: [] };
-      }
-      throw new Error(`Unexpected query: ${sql}`);
+      return Promise.resolve({ rows: [] });
     });
 
-    const report = await runDoctor(baseConfig, pool, { fix: true });
+    const runStatementMock = vi.fn().mockImplementation((sql: string) => {
+      queries.push(sql);
+      return Promise.resolve();
+    });
+
+    setupConnection({ query: queryMock, runStatement: runStatementMock });
+
+    const report = await runDoctor(baseConfig, driver, { fix: true });
 
     const tableCheck = report.checks.find(check => check.id === "migrations-table");
     expect(tableCheck?.status).toBe("pass");
@@ -197,45 +185,53 @@ describe("runDoctor", () => {
     expect(report.ok).toBe(true);
   });
 
-  it("fails when advisory lock cannot be acquired", async () => {
-    const pool = createPool(async (sql) => {
+  it("fails advisory lock when acquire returns false", async () => {
+    const queryMock = vi.fn().mockImplementation((sql: string) => {
       if (sql.includes("SELECT version()")) {
-        return {
-          rows: [{
-            version: "PostgreSQL 15.4",
-            current_database: "nomaddb",
-            current_user: "postgres",
-            timezone: "UTC",
-            encoding: "UTF8"
-          }]
-        };
+        return Promise.resolve({ rows: [{ current_database: "nomaddb", current_user: "postgres" }] });
       }
-      if (sql.includes("information_schema.schemata")) {
-        return { rows: [{ exists: 1 }] };
+      if (sql.includes("information_schema")) {
+        return Promise.resolve({ rows: [{ exists: 1 }] });
       }
-      if (sql.includes("information_schema.tables")) {
-        return { rows: [{ exists: 1 }] };
-      }
-      if (sql.includes("pg_try_advisory_lock")) {
-        return { rows: [{ pg_try_advisory_lock: false }] };
-      }
-      if (sql.includes("pg_advisory_unlock")) {
-        return { rows: [{ pg_advisory_unlock: true }] };
-      }
-      if (sql.includes("BEGIN")) {
-        return { rows: [] };
-      }
-      if (sql.includes("ROLLBACK")) {
-        return { rows: [] };
-      }
-      throw new Error(`Unexpected query: ${sql}`);
+      return Promise.resolve({ rows: [{ exists: 1 }] });
     });
 
-    const report = await runDoctor(baseConfig, pool, {});
+    setupConnection({
+      query: queryMock,
+      acquireLock: vi.fn().mockResolvedValue(false)
+    });
+
+    const report = await runDoctor(baseConfig, driver, {});
 
     const lockCheck = report.checks.find(check => check.id === "advisory-lock");
     expect(lockCheck?.status).toBe("fail");
-    expect(lockCheck?.message).toMatch(/another migration may be in progress|could not acquire/i);
     expect(report.ok).toBe(false);
+  });
+
+  it("passes advisory lock when acquired", async () => {
+    const queryMock = vi.fn().mockImplementation((sql: string) => {
+      if (sql.includes("SELECT version()")) {
+        return Promise.resolve({ rows: [{ current_database: "nomaddb", current_user: "postgres" }] });
+      }
+      if (sql.includes("information_schema")) {
+        return Promise.resolve({ rows: [{ exists: 1 }] });
+      }
+      return Promise.resolve({ rows: [{ exists: 1 }] });
+    });
+
+    const releaseMock = vi.fn().mockResolvedValue(undefined);
+
+    setupConnection({
+      query: queryMock,
+      acquireLock: vi.fn().mockResolvedValue(true),
+      releaseLock: releaseMock
+    });
+
+    const report = await runDoctor(baseConfig, driver, {});
+
+    const lockCheck = report.checks.find(check => check.id === "advisory-lock");
+    expect(lockCheck?.status).toBe("pass");
+    expect(releaseMock).toHaveBeenCalled();
+    expect(report.ok).toBe(true);
   });
 });

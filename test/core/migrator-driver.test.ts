@@ -18,12 +18,12 @@ describe("Migrator driver seams", () => {
 
     const driver: Driver = {
       supportsTransactionalDDL: true,
-      getPool: vi.fn(() => ({}) as any),
       connect: connectMock,
       close: vi.fn().mockResolvedValue(undefined),
       quoteIdent: vi.fn(id => `"${id}"`),
       nowExpression: vi.fn(() => "NOW()"),
-      mapError: vi.fn(error => (error instanceof Error ? error : new Error(String(error))))
+      mapError: vi.fn(error => (error instanceof Error ? error : new Error(String(error)))),
+      probeConnection: vi.fn().mockResolvedValue(undefined)
     };
 
     return { driver, connectMock };

@@ -220,6 +220,56 @@ describe("Transaction & Hazard Detection", () => {
       });
     });
 
+
+    describe("MySQL hazard patterns", () => {
+      it("should detect LOCK TABLES statements", () => {
+        const sql = "LOCK TABLES users WRITE, orders READ;";
+        const hazards = detectHazards(sql);
+        expect(hazards).toHaveLength(1);
+        expect(hazards[0].type).toBe("LOCK_TABLES");
+      });
+
+      it("should detect LOAD DATA INFILE operations", () => {
+        const variations = [
+          "LOAD DATA INFILE '/tmp/users.csv' INTO TABLE users;",
+          "LOAD DATA LOCAL INFILE '/tmp/users.csv' INTO TABLE users;"
+        ];
+
+        variations.forEach(sql => {
+          const hazards = detectHazards(sql);
+          expect(hazards).toHaveLength(1);
+          expect(hazards[0].type).toBe("LOAD_DATA_INFILE");
+        });
+      });
+
+      it("should detect ALTER TABLE operations with ALGORITHM hints", () => {
+        const sql = "ALTER TABLE users ADD COLUMN bio TEXT, ALGORITHM=INPLACE, LOCK=NONE;";
+        const hazards = detectHazards(sql);
+        expect(hazards).toHaveLength(1);
+        expect(hazards[0].type).toBe("ALTER_TABLE_ALGORITHM");
+      });
+
+      it("should detect OPTIMIZE/ANALYZE/REPAIR TABLE operations", () => {
+        const variations = [
+          "OPTIMIZE TABLE users;",
+          "ANALYZE TABLE users;",
+          "REPAIR TABLE users;"
+        ];
+
+        variations.forEach(sql => {
+          const hazards = detectHazards(sql);
+          expect(hazards).toHaveLength(1);
+          expect(hazards[0].type).toBe("TABLE_MAINTENANCE");
+        });
+      });
+
+      it("should ignore hazard keywords inside strings", () => {
+        const sql = "INSERT INTO notes VALUES ('remember to LOCK TABLES later');";
+        const hazards = detectHazards(sql);
+        expect(hazards).toHaveLength(0);
+      });
+    });
+
     describe("ALTER SYSTEM", () => {
       it("should detect ALTER SYSTEM", () => {
         const variations = [
