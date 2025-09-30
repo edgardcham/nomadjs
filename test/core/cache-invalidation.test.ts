@@ -1,13 +1,13 @@
+
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Migrator } from "../../src/core/migrator.js";
 import type { Config } from "../../src/config.js";
-import { Pool } from "pg";
 import { statSync, readFileSync } from "node:fs";
 import { listMigrationFiles, filenameToVersion } from "../../src/core/files.js";
 import { parseNomadSqlFile } from "../../src/parser/enhanced-parser.js";
 import { calculateChecksum } from "../../src/core/checksum.js";
+import { createDriverMock } from "../helpers/driver-mock.js";
 
-vi.mock("pg");
 vi.mock("node:fs");
 vi.mock("../../src/core/files.js");
 vi.mock("../../src/parser/enhanced-parser.js");
@@ -22,21 +22,16 @@ describe("Migration file caching", () => {
   } as any;
 
   let migrator: Migrator;
-  let mockPool: any;
+  const driver = createDriverMock();
 
   beforeEach(() => {
     vi.resetAllMocks();
     process.env.NODE_ENV = undefined;
 
-    mockPool = {
-      query: vi.fn(),
-      connect: vi.fn().mockResolvedValue({ query: vi.fn(), release: vi.fn() })
-    };
-
     (listMigrationFiles as unknown as vi.Mock).mockReturnValue(["./migrations/20240101010101_init.sql"]);
     (filenameToVersion as unknown as vi.Mock).mockReturnValue("20240101010101");
 
-    migrator = new Migrator(config, mockPool as unknown as Pool);
+    migrator = new Migrator(config, driver);
   });
 
   afterEach(() => {
@@ -51,8 +46,7 @@ describe("Migration file caching", () => {
     (calculateChecksum as unknown as vi.Mock).mockReturnValue("checksum1");
     (parseNomadSqlFile as unknown as vi.Mock).mockReturnValue({
       up: { statements: ["SELECT 1;"], statementMeta: [], notx: false },
-      down: { statements: [], statementMeta: [], notx: false },
-      tags: []
+      down: { statements: [], statementMeta: [], notx: false }
     });
 
     await migrator.loadMigrationFiles();
@@ -74,8 +68,7 @@ describe("Migration file caching", () => {
     (calculateChecksum as unknown as vi.Mock).mockReturnValue("checksum1");
     (parseNomadSqlFile as unknown as vi.Mock).mockReturnValue({
       up: { statements: ["SELECT 1;"], statementMeta: [], notx: false },
-      down: { statements: [], statementMeta: [], notx: false },
-      tags: []
+      down: { statements: [], statementMeta: [], notx: false }
     });
 
     await migrator.loadMigrationFiles();
@@ -98,8 +91,7 @@ describe("Migration file caching", () => {
       .mockReturnValueOnce("checksum2");
     (parseNomadSqlFile as unknown as vi.Mock).mockReturnValue({
       up: { statements: ["SELECT 1;"], statementMeta: [], notx: false },
-      down: { statements: [], statementMeta: [], notx: false },
-      tags: []
+      down: { statements: [], statementMeta: [], notx: false }
     });
 
     await migrator.loadMigrationFiles();

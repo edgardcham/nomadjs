@@ -3,13 +3,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-export function isDatabaseAvailable(url: string, nomadCmd: string): boolean {
+export function isDatabaseAvailable(url: string, nomadCmd: string, driver?: "postgres" | "mysql"): boolean {
   const tempDirRoot = join(tmpdir(), "nomad-cli-db-check-");
   const tempDir = mkdtempSync(tempDirRoot);
   const tableName = `nomad_probe_${Date.now()}`;
   try {
+    const driverFlag = driver ? ` --driver ${driver}` : "";
     execSync(
-      `${nomadCmd} status --url "${url}" --dir "${tempDir}" --table ${tableName}`,
+      `${nomadCmd}${driverFlag} status --url "${url}" --dir "${tempDir}" --table ${tableName}`,
       {
         stdio: "ignore",
         env: { ...process.env, NODE_ENV: "test", DATABASE_URL: url }

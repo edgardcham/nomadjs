@@ -56,3 +56,56 @@ jobs:
           NOMAD_TEST_WITH_DB: "true"
           NOMAD_PG_CONNECT_TIMEOUT_MS: "2000"
         run: npm test
+
+  mysql-test:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [20]
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: nomad
+          MYSQL_DATABASE: nomad_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h127.0.0.1 -uroot -pnomad --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Wait for MySQL
+        run: |
+          sudo apt-get update && sudo apt-get install -y mysql-client
+          for i in {1..30}; do
+            mysql --protocol=TCP -h127.0.0.1 -P3306 -uroot -pnomad -e 'SELECT 1' >/dev/null 2>&1 && break
+            echo "Waiting for MySQL..."; sleep 2
+          done
+
+      - name: Run MySQL-specific tests
+        env:
+          MYSQL_URL: mysql://root:nomad@127.0.0.1:3306/nomad_test
+          NOMAD_TEST_WITH_DB_MYSQL: "true"
+          NOMAD_DRIVER: mysql
+          NOMAD_MYSQL_CONNECT_TIMEOUT_MS: "2000"
+        run: npm test -- test/cli/mysql-integration.test.ts
+

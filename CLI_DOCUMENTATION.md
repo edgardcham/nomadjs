@@ -2,7 +2,7 @@
 
 ## Overview
 
-NomadJS is a production-ready SQL migration tool for Node.js with advanced features including checksums, transaction control, and comprehensive PostgreSQL support.
+NomadJS is a production-ready SQL migration tool for Node.js with advanced features including checksums, transaction control, and adapters for PostgreSQL and MySQL.
 
 ## Features
 
@@ -24,6 +24,18 @@ NomadJS is a production-ready SQL migration tool for Node.js with advanced featu
    - Unicode, emoji, and binary data support
 
 ### Configuration System
+
+## Database Drivers
+
+Nomad ships with adapters for PostgreSQL (default) and MySQL. Switch between them via:
+
+- CLI flag: `--driver postgres` or `--driver mysql`
+- Environment variable: `NOMAD_DRIVER=postgres|mysql`
+- Config file: `[database]
+ driver = "mysql"`
+
+When the MySQL driver is active, migrations run outside explicit transactions (MySQL auto-commits most DDL), tables use `DATETIME(3)` timestamps, and advisory locking relies on `GET_LOCK`/`RELEASE_LOCK`. Set `NOMAD_MYSQL_CONNECT_TIMEOUT_MS` (or `NOMAD_PG_CONNECT_TIMEOUT_MS`) if you need faster connection probes in CI environments.
+
    - Multiple config sources (CLI > env > config file > defaults)
    - Supports TOML and JSON config files
    - Environment variable substitution (`${VAR_NAME}` syntax)
@@ -36,6 +48,21 @@ NomadJS is a production-ready SQL migration tool for Node.js with advanced featu
    - Override in CI with `NOMAD_NO_COLOR=false` if ANSI colors are desired
 
 ## CLI Commands
+### Global Flags
+
+These options can be supplied before any command:
+
+- `--driver <postgres|mysql>` – choose the database adapter (default: postgres)
+- `--url <connectionString>` – override `DATABASE_URL`
+- `--dir <path>` – migration directory (default: `migrations`)
+- `--table <name>` – version tracking table (default: `nomad_migrations`)
+- `--allow-drift` – permit checksum drift (dangerous)
+- `--auto-notx` – auto disable transactions for hazardous migrations
+- `--events-json` – emit NDJSON events to stdout
+- `--verbose` – per-statement logging with timing information
+
+Environment counterparts: `NOMAD_DRIVER`, `DATABASE_URL`/`NOMAD_DATABASE_URL`, `MYSQL_URL`, `NOMAD_MIGRATIONS_DIR`, `NOMAD_DB_TABLE`, `NOMAD_ALLOW_DRIFT`, `NOMAD_AUTO_NOTX`, `NOMAD_EVENTS_JSON`, `NOMAD_VERBOSE`.
+
 
 ### `nomad init-config [format]`
 Create a configuration file template.
@@ -58,6 +85,7 @@ nomad init-config json --output database.json
 # Database connection URL
 # Supports environment variable substitution
 url = "postgresql://user:password@localhost:5432/dbname"
+# driver = "mysql"  # Optional: switch to the MySQL adapter
 # Or use env vars:
 # url = "${DATABASE_URL}"
 # url = "postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"

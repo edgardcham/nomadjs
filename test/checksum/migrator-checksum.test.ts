@@ -127,7 +127,7 @@ describe("Migrator with Checksum Support", () => {
 
       expect(queryMock).toHaveBeenCalledTimes(1);
       const createTableCall = queryMock.mock.calls[0][0];
-      expect(createTableCall).toContain("CREATE TABLE IF NOT EXISTS nomad_migrations");
+      expect(createTableCall).toContain('CREATE TABLE IF NOT EXISTS "nomad_migrations"');
       expect(createTableCall).toContain("checksum");
       expect(createTableCall).toContain("TEXT NOT NULL");
     });
@@ -168,9 +168,10 @@ describe("Migrator with Checksum Support", () => {
       await migrator.up(1);
 
       // Find the INSERT query
-      const insertCall = queryMock.mock.calls.find((call: any[]) =>
-        call[0]?.includes("INSERT INTO nomad_migrations")
-      );
+      const insertCall = queryMock.mock.calls.find((call: any[]) => {
+        const sql = call[0];
+        return typeof sql === "string" && (sql.includes('INSERT INTO "nomad_migrations"') || sql.includes("INSERT INTO nomad_migrations"));
+      });
 
       expect(insertCall).toBeDefined();
       expect(insertCall[0]).toContain("checksum");

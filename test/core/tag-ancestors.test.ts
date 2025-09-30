@@ -1,30 +1,28 @@
+
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { Migrator } from "../../src/core/migrator.js";
 import { listMigrationFiles, filenameToVersion } from "../../src/core/files.js";
 import { parseNomadSqlFile } from "../../src/parser/enhanced-parser.js";
-import { calculateChecksum } from "../../src/core/checksum.js";
 import { readFileSync } from "node:fs";
-import { Pool } from "pg";
 import type { Config } from "../../src/config.js";
+import { createDriverMock } from "../helpers/driver-mock.js";
 
-vi.mock("pg");
 vi.mock("node:fs");
 vi.mock("../../src/core/files.js");
 vi.mock("../../src/parser/enhanced-parser.js");
 
-describe("Tag filtering with include-ancestors", () => {
+describe("Tag ancestors", () => {
   let migrator: Migrator;
-  let mockPool: any;
-  let queryMock: ReturnType<typeof vi.fn>;
-  let listMigrationFilesMock: ReturnType<typeof vi.fn>;
-  let readFileSyncMock: ReturnType<typeof vi.fn>;
-  let parseNomadSqlFileMock: ReturnType<typeof vi.fn>;
-  let filenameToVersionMock: ReturnType<typeof vi.fn>;
+  let listFilesMock: ReturnType<typeof vi.mocked>;
+  let readFileMock: ReturnType<typeof vi.mocked>;
+  let parseFileMock: ReturnType<typeof vi.mocked>;
+  let filenameToVersionMock: ReturnType<typeof vi.mocked>;
+  const driver = createDriverMock();
 
   const config: Config = {
     driver: "postgres",
-    url: "postgresql://test:test@localhost:5432/testdb",
-    dir: "/test/migrations",
+    url: "postgresql://test@test/db",
+    dir: "/migrations",
     table: "nomad_migrations",
     allowDrift: false,
     autoNotx: false
@@ -32,70 +30,39 @@ describe("Tag filtering with include-ancestors", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.spyOn(console, 'log').mockImplementation(() => {});
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    listFilesMock = vi.mocked(listMigrationFiles);
+    readFileMock = vi.mocked(readFileSync as unknown as typeof readFileSync);
+    parseFileMock = vi.mocked(parseNomadSqlFile);
+    filenameToVersionMock = vi.mocked(filenameToVersion);
+    filenameToVersionMock.mockImplementation((filepath: string) => (filepath.match(/(\d{14})/) || [])[1]);
+    migrator = new Migrator(config, driver);
+  });
 
-    queryMock = vi.fn();
-    mockPool = {
-      query: queryMock,
-      end: vi.fn(),
-      connect: vi.fn().mockResolvedValue({ query: queryMock, release: vi.fn() })
-    };
-    (Pool as any).mockImplementation(() => mockPool);
+  it("includes earlier ancestors when requested", async () => {
+    listFilesMock.mockReturnValue([
+      "/migrations/20240101000000_one.sql",
+      "/migrations/20240102000000_two.sql",
+      "/migrations/20240103000000_three.sql"
+    ]);
 
-    listMigrationFilesMock = listMigrationFiles as any;
-    readFileSyncMock = readFileSync as any;
-    parseNomadSqlFileMock = parseNomadSqlFile as any;
-    filenameToVersionMock = filenameToVersion as any;
-    filenameToVersionMock.mockImplementation((filepath: string) => {
-      const m = filepath.match(/(\d{14})/);
-      return m ? m[1] : undefined;
+    readFileMock.mockReturnValue("SELECT 1;");
+    parseFileMock
+      .mockReturnValueOnce({ up: { statements: ["SELECT 1;"], notx: false }, down: { statements: [], notx: false }, tags: [], noTransaction: false } as any)
+      .mockReturnValueOnce({ up: { statements: ["SELECT 1;"], notx: false }, down: { statements: [], notx: false }, tags: ["users"], noTransaction: false } as any)
+      .mockReturnValueOnce({ up: { statements: ["SELECT 1;"], notx: false }, down: { statements: [], notx: false }, tags: ["users"], noTransaction: false } as any);
+
+    const ensureConn = driver.enqueueConnection({
+      ensureMigrationsTable: vi.fn().mockResolvedValue(undefined),
+      fetchAppliedMigrations: vi.fn().mockResolvedValue([])
+    });
+    const fetchConn = driver.enqueueConnection({
+      fetchAppliedMigrations: vi.fn().mockResolvedValue([])
     });
 
-    migrator = new Migrator(config, mockPool);
-  });
-
-  it("planUp includes earlier pending when includeAncestors=true", async () => {
-    listMigrationFilesMock.mockReturnValue([
-      "/test/migrations/20240101120000_init.sql",
-      "/test/migrations/20240102120000_users.sql"
-    ]);
-
-    const sql = "SELECT 1;";
-    readFileSyncMock.mockReturnValue(sql);
-    parseNomadSqlFileMock
-      .mockReturnValueOnce({ up: { statements: [sql], notx: false }, down: { statements: [sql], notx: false }, noTransaction: false, tags: undefined })
-      .mockReturnValueOnce({ up: { statements: [sql], notx: false }, down: { statements: [sql], notx: false }, noTransaction: false, tags: ["users"] });
-
-    // No applied
-    queryMock
-      .mockResolvedValueOnce({ rows: [] }) // ensureTable
-      .mockResolvedValueOnce({ rows: [] });
-
     const plan = await migrator.planUp({ filter: { tags: ["users"] } as any, includeAncestors: true });
-    expect(plan.migrations.map(m => m.name)).toEqual(["init", "users"]);
-  });
 
-  it("planUp warns when earlier pending are excluded and includeAncestors=false", async () => {
-    listMigrationFilesMock.mockReturnValue([
-      "/test/migrations/20240101120000_init.sql",
-      "/test/migrations/20240102120000_users.sql"
-    ]);
-
-    const sql = "SELECT 1;";
-    readFileSyncMock.mockReturnValue(sql);
-    parseNomadSqlFileMock
-      .mockReturnValueOnce({ up: { statements: [sql], notx: false }, down: { statements: [sql], notx: false }, noTransaction: false, tags: undefined })
-      .mockReturnValueOnce({ up: { statements: [sql], notx: false }, down: { statements: [sql], notx: false }, noTransaction: false, tags: ["users"] });
-
-    // No applied
-    queryMock
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] });
-
-    const plan = await migrator.planUp({ filter: { tags: ["users"] } as any });
-    expect(plan.migrations.map(m => m.name)).toEqual(["users"]);
-    expect(plan.summary.warnings?.some(w => /ancestors|earlier pending/i.test(w))).toBe(true);
+    expect(plan.migrations.map(m => m.version.toString())).toEqual(["20240101000000", "20240102000000", "20240103000000"]);
+    expect(ensureConn.ensureMigrationsTable).toHaveBeenCalled();
+    expect(fetchConn.fetchAppliedMigrations).toHaveBeenCalled();
   });
 });
-

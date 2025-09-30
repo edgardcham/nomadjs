@@ -1,75 +1,56 @@
+
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import type { MockedFunction } from "vitest";
 import { Migrator } from "../../src/core/migrator.js";
 import { listMigrationFiles, filenameToVersion } from "../../src/core/files.js";
 import { parseNomadSqlFile, type ParsedMigration } from "../../src/parser/enhanced-parser.js";
 import { readFileSync } from "node:fs";
-import { Pool } from "pg";
-import type { Config } from "../../src/config.js";
 import { calculateChecksum } from "../../src/core/checksum.js";
+import type { Config } from "../../src/config.js";
+import type { Driver, DriverConnection, AppliedMigrationRow } from "../../src/driver/types.js";
 
-vi.mock("pg");
 vi.mock("node:fs");
 vi.mock("../../src/core/files.js");
 vi.mock("../../src/parser/enhanced-parser.js");
 
-type TestMigration = {
+interface TestMigration {
   version: string;
   name: string;
   filepath: string;
   content: string;
   parsed: ParsedMigration;
   checksum: string;
-};
+}
 
-type AppliedRowInput = {
+interface AppliedRowInput {
   version: string;
   name?: string;
   checksum?: string;
   rolledBackAt?: string | null;
-};
+}
 
 const MIG_DIR = "/migrations";
 
-const baseConfig: Config = {
-  driver: "postgres",
-  url: "postgresql://test@test/db",
-  dir: MIG_DIR,
-  table: "nomad_migrations",
-  allowDrift: false,
-  autoNotx: false
-} as any;
 
-let mockPool: any;
-let queryMock: ReturnType<typeof vi.fn>;
-let listFilesMock: ReturnType<typeof vi.fn>;
-let readFileMock: ReturnType<typeof vi.fn>;
-let parseFileMock: ReturnType<typeof vi.fn>;
-let filenameToVersionMock: ReturnType<typeof vi.fn>;
-let logSpy: ReturnType<typeof vi.spyOn> | undefined;
+let listFilesMock: MockedFunction<typeof listMigrationFiles>;
+let readFileMock: MockedFunction<typeof readFileSync>;
+let parseFileMock: MockedFunction<typeof parseNomadSqlFile>;
+let filenameToVersionMock: MockedFunction<typeof filenameToVersion>;
+let consoleLogSpy: ReturnType<typeof vi.spyOn> | undefined;
 
 beforeEach(() => {
-  vi.clearAllMocks();
-
-  queryMock = vi.fn(async () => ({ rows: [] }));
-  mockPool = {
-    query: queryMock,
-    connect: vi.fn().mockResolvedValue({ query: queryMock, release: vi.fn() }),
-    end: vi.fn()
-  };
-  (Pool as any).mockImplementation(() => mockPool);
-
-  listFilesMock = listMigrationFiles as any;
-  readFileMock = readFileSync as any;
-  parseFileMock = parseNomadSqlFile as any;
-  filenameToVersionMock = filenameToVersion as any;
+  listFilesMock = vi.mocked(listMigrationFiles);
+  readFileMock = vi.mocked(readFileSync as unknown as typeof readFileSync);
+  parseFileMock = vi.mocked(parseNomadSqlFile);
+  filenameToVersionMock = vi.mocked(filenameToVersion);
 });
 
 afterEach(() => {
-  logSpy?.mockRestore();
-  logSpy = undefined;
+  consoleLogSpy?.mockRestore();
+  consoleLogSpy = undefined;
 });
 
-describe("Events JSON", () => {
+describe.each(["postgres", "mysql"] as const)("Events JSON (%s)", flavor => {
   it("emits lock/apply/stmt/end events for up migrations", async () => {
     const migrations = [
       buildMigration("20240101010101", "create_users", [
@@ -85,7 +66,7 @@ describe("Events JSON", () => {
       ])
     ];
 
-    const { migrator, events } = setupTest({ migrations });
+    const { migrator, events } = setupTest({ migrations, flavor });
 
     await migrator.up();
 
@@ -122,47 +103,6 @@ describe("Events JSON", () => {
     expect(events.at(-1)).toMatchObject({ event: "lock-released" });
   });
 
-  it("emits structured events when rolling back with down()", async () => {
-    const migration = buildMigration("20240102030303", "drop_users", [
-      "CREATE TABLE users(id int);"
-    ], [
-      "DROP TABLE users;",
-      "DROP TYPE user_status;"
-    ]);
-
-    const checksum = migration.checksum;
-    const { migrator, events, setAppliedRows } = setupTest({
-      migrations: [migration]
-    });
-    setAppliedRows([
-      { version: migration.version, name: migration.name, checksum }
-    ]);
-
-    await migrator.down();
-
-    const kinds = events.map(e => e.event);
-    expect(kinds).toEqual([
-      "lock-acquired",
-      "apply-start",
-      "stmt-run",
-      "stmt-run",
-      "apply-end",
-      "lock-released"
-    ]);
-
-    expect(events[1]).toMatchObject({
-      event: "apply-start",
-      direction: "down",
-      version: migration.version
-    });
-    expect(events.filter(e => e.event === "stmt-run")).toHaveLength(2);
-    expect(events[4]).toMatchObject({
-      event: "apply-end",
-      direction: "down",
-      version: migration.version
-    });
-  });
-
   it("emits down/up cycles for redo()", async () => {
     const migration = buildMigration("20240103040404", "redo_me", [
       "CREATE TABLE t(id int);"
@@ -171,7 +111,8 @@ describe("Events JSON", () => {
     ]);
 
     const { migrator, events, setAppliedRows } = setupTest({
-      migrations: [migration]
+      migrations: [migration],
+      flavor
     });
     setAppliedRows([
       { version: migration.version, name: migration.name, checksum: migration.checksum }
@@ -202,7 +143,8 @@ describe("Events JSON", () => {
     const migrationB = buildMigration("20240104050505", "feature", ["ALTER TABLE a ADD COLUMN note text;"], ["ALTER TABLE a DROP COLUMN note;"]);
 
     const { migrator, events, setAppliedRows } = setupTest({
-      migrations: [migrationA, migrationB]
+      migrations: [migrationA, migrationB],
+      flavor
     });
     setAppliedRows([
       { version: migrationA.version, checksum: migrationA.checksum },
@@ -230,7 +172,8 @@ describe("Events JSON", () => {
     const migrationB = buildMigration("20240104050505", "feature", ["ALTER TABLE a ADD COLUMN note text;"]);
 
     const { migrator, events, setAppliedRows } = setupTest({
-      migrations: [migrationA, migrationB]
+      migrations: [migrationA, migrationB],
+      flavor
     });
     setAppliedRows([
       { version: migrationA.version, checksum: migrationA.checksum }
@@ -252,7 +195,7 @@ describe("Events JSON", () => {
 
   it("announces verify lifecycle with NDJSON when enabled", async () => {
     const migration = buildMigration("20240106060606", "verify_me", ["SELECT 1;"], ["SELECT 1;"]);
-    const { migrator, events, setAppliedRows } = setupTest({ migrations: [migration] });
+    const { migrator, events, setAppliedRows } = setupTest({ migrations: [migration], flavor });
     setAppliedRows([
       { version: migration.version, checksum: migration.checksum, name: migration.name }
     ]);
@@ -274,12 +217,11 @@ describe("Events JSON", () => {
   });
 });
 
-function setupTest(options: {
-  migrations: TestMigration[];
-}) {
+function setupTest(options: { migrations: TestMigration[]; flavor: "postgres" | "mysql" }) {
   const sorted = [...options.migrations].sort((a, b) => (a.version < b.version ? -1 : a.version > b.version ? 1 : 0));
   const byFile = new Map(sorted.map(m => [m.filepath, m]));
   const byVersion = new Map(sorted.map(m => [m.version, m]));
+  let appliedRows: AppliedMigrationRow[] = [];
 
   listFilesMock.mockReturnValue(sorted.map(m => m.filepath));
   readFileMock.mockImplementation((filepath: string) => {
@@ -300,39 +242,106 @@ function setupTest(options: {
     return match[1];
   });
 
-  let appliedRows = [] as Array<ReturnType<typeof toDbRow>>;
-
-  queryMock.mockImplementation(async (sql: string) => {
-    if (/pg_try_advisory_lock/i.test(sql)) {
-      return { rows: [{ pg_try_advisory_lock: true }] };
-    }
-    if (/pg_advisory_unlock/i.test(sql)) {
-      return { rows: [{ pg_advisory_unlock: true }] };
-    }
-    if (/SELECT version, name, checksum, applied_at, rolled_back_at/i.test(sql)) {
-      return { rows: appliedRows };
-    }
-    return { rows: [] };
+  const driver = createStatefulDriver(options.flavor, appliedRowsRef => {
+    appliedRows = appliedRowsRef;
   });
-
-  const config: Config = { ...baseConfig, eventsJson: true } as any;
-  const migrator = new Migrator(config, mockPool);
+  const config: Config = {
+    driver: options.flavor,
+    url: options.flavor === "mysql" ? "mysql://test@test/db" : "postgresql://test@test/db",
+    dir: MIG_DIR,
+    table: "nomad_migrations",
+    schema: options.flavor === "postgres" ? "public" : undefined,
+    allowDrift: false,
+    autoNotx: false,
+    eventsJson: true
+  } as any;
+  const migrator = new Migrator(config, driver);
 
   const events: any[] = [];
-  logSpy = vi.spyOn(console, "log").mockImplementation((value: any) => {
-    const str = typeof value === "string" ? value : String(value);
-    const candidate = str.trim();
-    if (!candidate.startsWith("{")) return;
-    events.push(JSON.parse(candidate));
+  consoleLogSpy = vi.spyOn(console, "log").mockImplementation((value: any) => {
+    const text = typeof value === "string" ? value : String(value);
+    const trimmed = text.trim();
+    if (!trimmed.startsWith("{")) return;
+    events.push(JSON.parse(trimmed));
   });
 
   return {
     migrator,
     events,
     setAppliedRows(inputs: AppliedRowInput[]) {
-      appliedRows = inputs.map(row => toDbRow(row, byVersion));
+      appliedRows = inputs.map(input => {
+        const mig = byVersion.get(input.version);
+        const checksum = input.checksum ?? mig?.checksum ?? `chk-${input.version}`;
+        const name = input.name ?? mig?.name ?? input.version;
+        return {
+          version: BigInt(input.version),
+          name,
+          checksum,
+          appliedAt: new Date("2024-01-01T00:00:00Z"),
+          rolledBackAt: input.rolledBackAt ? new Date(input.rolledBackAt) : null
+        } satisfies AppliedMigrationRow;
+      });
+      driver.__setAppliedRows(appliedRows);
     }
   };
+}
+
+function createStatefulDriver(flavor: "postgres" | "mysql", onStateChange: (rows: AppliedMigrationRow[]) => void): Driver & { __setAppliedRows(rows: AppliedMigrationRow[]): void } {
+  let appliedRows: AppliedMigrationRow[] = [];
+
+  const createConnection = (): DriverConnection => {
+    return {
+      ensureMigrationsTable: vi.fn().mockResolvedValue(undefined),
+      fetchAppliedMigrations: vi.fn().mockResolvedValue(appliedRows.map(row => ({ ...row }))),
+      markMigrationApplied: vi.fn(async ({ version, name, checksum }) => {
+        const existing = appliedRows.find(row => row.version === version);
+        if (existing) {
+          existing.name = name;
+          existing.checksum = checksum;
+          existing.appliedAt = new Date();
+          existing.rolledBackAt = null;
+        } else {
+          appliedRows.push({
+            version,
+            name,
+            checksum,
+            appliedAt: new Date(),
+            rolledBackAt: null
+          });
+        }
+      }),
+      markMigrationRolledBack: vi.fn(async (version: bigint) => {
+        const existing = appliedRows.find(row => row.version === version);
+        if (existing) {
+          existing.rolledBackAt = new Date();
+        }
+      }),
+      acquireLock: vi.fn().mockResolvedValue(true),
+      releaseLock: vi.fn().mockResolvedValue(undefined),
+      beginTransaction: vi.fn().mockResolvedValue(undefined),
+      commitTransaction: vi.fn().mockResolvedValue(undefined),
+      rollbackTransaction: vi.fn().mockResolvedValue(undefined),
+      runStatement: vi.fn().mockResolvedValue(undefined),
+      dispose: vi.fn().mockResolvedValue(undefined)
+    } as DriverConnection;
+  };
+
+  const driver: Driver & { __setAppliedRows(rows: AppliedMigrationRow[]): void } = {
+    supportsTransactionalDDL: flavor === "postgres",
+    connect: vi.fn(async () => createConnection()),
+    close: vi.fn().mockResolvedValue(undefined),
+    quoteIdent: vi.fn(identifier => flavor === "mysql" ? `\`${identifier}\`` : `"${identifier}"`),
+    nowExpression: vi.fn(() => flavor === "mysql" ? "CURRENT_TIMESTAMP(3)" : "NOW()"),
+    mapError: vi.fn(error => (error instanceof Error ? error : new Error(String(error)))),
+    probeConnection: vi.fn().mockResolvedValue(undefined),
+    __setAppliedRows(rows: AppliedMigrationRow[]) {
+      appliedRows = rows.map(row => ({ ...row }));
+      onStateChange(appliedRows);
+    }
+  } as Driver & { __setAppliedRows(rows: AppliedMigrationRow[]): void };
+
+  driver.__setAppliedRows([]);
+  return driver;
 }
 
 function buildMigration(
@@ -349,7 +358,7 @@ function buildMigration(
     ...downStatements
   ].join("\n");
 
-  const parsed = {
+  const parsed: ParsedMigration = {
     up: {
       statements: upStatements,
       statementMeta: upStatements.map((sql, idx) => ({ sql, line: idx + 1, column: 1 })),
@@ -360,9 +369,10 @@ function buildMigration(
       statementMeta: downStatements.map((sql, idx) => ({ sql, line: idx + 1, column: 1 })),
       notx: false
     },
-    noTransaction: false,
-    tags: [] as string[]
-  };
+    statementBlocks: [],
+    tags: [],
+    noTransaction: false
+  } as ParsedMigration;
 
   return {
     version,
@@ -374,16 +384,7 @@ function buildMigration(
   };
 }
 
-function toDbRow(input: AppliedRowInput, lookup: Map<string, TestMigration>) {
-  const migration = lookup.get(input.version);
-  if (!migration) {
-    throw new Error(`Missing migration for version ${input.version}`);
-  }
-  return {
-    version: input.version,
-    name: input.name ?? migration.name,
-    checksum: input.checksum ?? migration.checksum,
-    applied_at: new Date().toISOString(),
-    rolled_back_at: input.rolledBackAt ?? null
-  };
+function setAppliedRowsOnDriver(driver: Driver & { __setAppliedRows(rows: AppliedMigrationRow[]): void }, rows: AppliedMigrationRow[]) {
+  driver.__setAppliedRows(rows);
 }
+

@@ -1,30 +1,29 @@
+
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { Migrator } from "../../src/core/migrator.js";
 import { listMigrationFiles, filenameToVersion } from "../../src/core/files.js";
 import { parseNomadSqlFile } from "../../src/parser/enhanced-parser.js";
 import { readFileSync } from "node:fs";
-import { Pool } from "pg";
 import type { Config } from "../../src/config.js";
-
-vi.mock("pg");
+import { createDriverMock } from "../helpers/driver-mock.js";
 vi.mock("node:fs");
 vi.mock("../../src/core/files.js");
 vi.mock("../../src/parser/enhanced-parser.js");
 
-describe("Verbose logging", () => {
+describe.each(["postgres", "mysql"] as const)("Verbose logging (%s)", flavor => {
   let migrator: Migrator;
-  let mockPool: any;
-  let queryMock: ReturnType<typeof vi.fn>;
-  let listFilesMock: ReturnType<typeof vi.fn>;
-  let readFileMock: ReturnType<typeof vi.fn>;
-  let parseFileMock: ReturnType<typeof vi.fn>;
-  let filenameToVersionMock: ReturnType<typeof vi.fn>;
+  let listFilesMock: ReturnType<typeof vi.mocked>;
+  let readFileMock: ReturnType<typeof vi.mocked>;
+  let parseFileMock: ReturnType<typeof vi.mocked>;
+  let filenameToVersionMock: ReturnType<typeof vi.mocked>;
+  let driver = createDriverMock({ flavor });
 
   const config: Config = {
-    driver: "postgres",
-    url: "postgresql://test@test/db",
+    driver: flavor,
+    url: flavor === "mysql" ? "mysql://test@test/db" : "postgresql://test@test/db",
     dir: "/migrations",
     table: "nomad_migrations",
+    schema: flavor === "postgres" ? "public" : undefined,
     allowDrift: false,
     autoNotx: false,
     verbose: true
@@ -32,54 +31,52 @@ describe("Verbose logging", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    queryMock = vi.fn(async (sql: string) => {
-      // Advisory lock queries
-      if (/pg_try_advisory_lock/i.test(sql)) return { rows: [{ pg_try_advisory_lock: true }] } as any;
-      if (/pg_advisory_unlock/i.test(sql)) return { rows: [{ pg_advisory_unlock: true }] } as any;
-      // Generic
-      return { rows: [] } as any;
+    listFilesMock = vi.mocked(listMigrationFiles);
+    readFileMock = vi.mocked(readFileSync as unknown as typeof readFileSync);
+    parseFileMock = vi.mocked(parseNomadSqlFile);
+    filenameToVersionMock = vi.mocked(filenameToVersion);
+
+    filenameToVersionMock.mockImplementation((filepath: string) => {
+      const match = filepath.match(/(\d{14})/);
+      return match ? match[1] : undefined;
     });
-    mockPool = {
-      query: queryMock,
-      connect: vi.fn().mockResolvedValue({ query: queryMock, release: vi.fn() }),
-      end: vi.fn()
-    };
-    (Pool as any).mockImplementation(() => mockPool);
 
-    listFilesMock = listMigrationFiles as any;
-    readFileMock = readFileSync as any;
-    parseFileMock = parseNomadSqlFile as any;
-    filenameToVersionMock = filenameToVersion as any;
-
-    filenameToVersionMock.mockImplementation((fp: string) => (fp.match(/(\d{14})/) || [])[1]);
-
-    migrator = new Migrator(config, mockPool);
+    driver = createDriverMock({ flavor });
+    migrator = new Migrator(config, driver);
   });
 
   it("prints per-statement timing during up", async () => {
     listFilesMock.mockReturnValue([
-      "/migrations/20240101120000_v.sql"
+      "/migrations/20240101120000_verbose.sql"
     ]);
-    readFileMock.mockReturnValue("CREATE TABLE t(id int); INSERT INTO t VALUES (1);");
+    readFileMock.mockReturnValue("CREATE TABLE t(id int);\nINSERT INTO t VALUES (1);");
     parseFileMock.mockReturnValue({
       up: {
         statements: ["CREATE TABLE t(id int);", "INSERT INTO t VALUES (1);"] ,
         statementMeta: [
           { sql: "CREATE TABLE t(id int);", line: 1, column: 1 },
-          { sql: "INSERT INTO t VALUES (1);", line: 1, column: 1 }
+          { sql: "INSERT INTO t VALUES (1);", line: 2, column: 1 }
         ],
         notx: false
       },
       down: { statements: [], statementMeta: [], notx: false },
-      noTransaction: false,
-      tags: ["test"]
+      noTransaction: false
+    } as any);
+
+    const execConn = driver.enqueueConnection({
+      fetchAppliedMigrations: vi.fn().mockResolvedValue([])
+    });
+    const fetchConn = driver.enqueueConnection({
+      fetchAppliedMigrations: vi.fn().mockResolvedValue([])
     });
 
-    // Spy on console.log through the logger
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
     await migrator.up();
 
+    expect(execConn.ensureMigrationsTable).toHaveBeenCalled();
+    expect(execConn.markMigrationApplied).toHaveBeenCalled();
+    expect(fetchConn.fetchAppliedMigrations).toHaveBeenCalled();
     const joined = logSpy.mock.calls.map(c => String(c[0])).join("\n");
     expect(joined).toMatch(/→ executing m1\/1 .*20240101120000/i);
     expect(joined).toMatch(/s1\/2 .*CREATE TABLE t\(id int\)/i);

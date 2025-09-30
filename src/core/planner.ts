@@ -42,7 +42,8 @@ export interface MigrationPlan {
 
 export class Planner {
   constructor(
-    private autoNotx: boolean = false
+    private autoNotx: boolean = false,
+    private supportsTransactionalDDL: boolean = true
   ) {}
 
   /**
@@ -136,8 +137,13 @@ export class Planner {
     const hazards = detectHazards(sql);
 
     // Determine if transaction should be used
-    let useTransaction = true;
+    let useTransaction = this.supportsTransactionalDDL;
     let reason: string | undefined;
+
+    if (!this.supportsTransactionalDDL) {
+      useTransaction = false;
+      reason = "driver does not support transactional DDL";
+    }
 
     if (directionData.notx || migration.parsed.noTransaction) {
       useTransaction = false;

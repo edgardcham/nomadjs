@@ -12,6 +12,7 @@ Production-ready SQL migration tool for Node.js with checksums, transaction cont
 - Automatic transaction wrapping with hazard detection
 - Detects operations that can't run in transactions (CREATE INDEX CONCURRENTLY, etc.)
 - Full PostgreSQL support (dollar quotes, E-strings, COPY)
+- MySQL driver with named locks, millisecond timestamps, and automatic non-transactional execution
 - TOML/JSON configuration with env var substitution
 - 300+ tests passing with comprehensive edge case coverage
 - Performance optimized with migration file caching
@@ -44,6 +45,22 @@ npm link            # exposes the `nomad` CLI globally during development
 To unlink later, run `npm unlink --global nomadjs` and `npm unlink nomadjs` in any project where it was linked.
 
 ## Database Prerequisites
+
+## Database Drivers
+
+Nomad defaults to PostgreSQL. Switch drivers using any of the following (all equivalent):
+
+- CLI: `--driver postgres` or `--driver mysql`
+- Environment: `NOMAD_DRIVER=postgres|mysql`
+- Config file fragment:
+  ```toml
+  [database]
+  driver = "mysql"
+  ```
+
+When targeting MySQL, Nomad uses named locks (`GET_LOCK`/`RELEASE_LOCK`), millisecond timestamp columns, and automatically skips transactions for migrations because MySQL auto-commits most DDL. Set `NOMAD_MYSQL_CONNECT_TIMEOUT_MS` (or fall back to `NOMAD_PG_CONNECT_TIMEOUT_MS`) to tune connection probes when the CLI checks database availability.
+
+### PostgreSQL
 - Create the target database yourself (Nomad will create only the version-tracking table).
 - For example, using the default `postgres` superuser:
   ```bash
@@ -51,6 +68,15 @@ To unlink later, run `npm unlink --global nomadjs` and `npm unlink nomadjs` in a
   export DATABASE_URL="postgres://postgres@localhost/nomaddb"
   ```
 - Alternatively, pass `--url` to each command instead of exporting `DATABASE_URL`.
+
+### MySQL
+- Create the application database up front:
+  ```bash
+  mysql -uroot -p -e "CREATE DATABASE nomad_test;"
+  export MYSQL_URL="mysql://root:password@localhost:3306/nomad_test"
+  ```
+- Run commands with `--driver mysql` (or set `NOMAD_DRIVER=mysql`).
+- Because MySQL auto-commits most DDL, Nomad automatically executes MySQL migrations without wrapping them in transactions.
 
 ## Creating & Running Migrations
 
@@ -162,7 +188,7 @@ INSERT INTO logs VALUES (E'Error:\\nFile not found');
 | `nomad verify` | Verify migration checksums |
 | `nomad doctor` | Diagnose configuration and database readiness |
 
-All commands accept `--url`, `--dir`, `--table`, `--allow-drift`, and `--auto-notx` flags.
+All commands accept `--url`, `--dir`, `--table`, `--driver`, `--allow-drift`, and `--auto-notx` flags.
 
 📚 **Full Documentation:** See [CLI_DOCUMENTATION.md](./CLI_DOCUMENTATION.md) for detailed usage, directives, and examples.
 
@@ -177,7 +203,7 @@ Nomad prints color-coded status lines (success, warnings, notes) when running in
 Nomad reads settings in this order (highest priority first):
 
 1. CLI flags (`--url`, `--dir`, `--table`, `--config`).
-2. Environment variables (`DATABASE_URL`, `NOMAD_MIGRATIONS_DIR`, `NOMAD_DB_TABLE`, `NOMAD_DATABASE_URL`).
+2. Environment variables (`DATABASE_URL`, `NOMAD_MIGRATIONS_DIR`, `NOMAD_DB_TABLE`, `NOMAD_DATABASE_URL`, `NOMAD_DRIVER`).
 3. Config file (`nomad.toml` or `nomad.json`).
 4. Defaults (`dir` defaults to `migrations`).
 
@@ -187,6 +213,16 @@ Place a `nomad.toml` or `nomad.json` next to your project to avoid repeating opt
 [database]
 url = "postgres://postgres@localhost/nomaddb"
 table = "nomad_db_version"
+
+[migrations]
+dir = "./migrations"
+```
+
+```toml
+# MySQL example
+[database]
+driver = "mysql"
+url = "mysql://root:password@localhost:3306/nomad_test"
 
 [migrations]
 dir = "./migrations"
@@ -448,6 +484,8 @@ Event types:
 Notes:
 - Events are emitted to stdout as one JSON object per line (NDJSON).
 - Human logs (including `--verbose`) remain colorized and readable.
+- Multi-database roadmap: Postgres driver in production, MySQL driver implementation landed (CLI wiring next),
+  full plan tracked in [MySQL_SUPPORT.md](MySQL_SUPPORT.md).
 
 ## Error Reporting
 
