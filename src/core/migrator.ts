@@ -111,7 +111,7 @@ export class Migrator {
     const url = this.config.url || "";
     const dir = this.config.dir || "";
     const table = this.config.table || "nomad_migrations";
-    const schema = this.config.schema || "public";
+    const schema = this.config.driver === "mysql" ? "" : (this.config.schema || "public");
     const data = `${url}|${dir}|${schema}|${table}`;
     return createHash("sha256").update(data).digest("hex");
   }

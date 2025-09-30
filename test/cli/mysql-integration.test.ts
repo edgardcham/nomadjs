@@ -71,7 +71,7 @@ describeIfDb("CLI: MySQL integration", () => {
   });
 
   function computeLockKey(table: string): string {
-    const data = `${mysqlUrl || ""}|${testDir}|${"public"}|${table}`;
+    const data = `${mysqlUrl || ""}|${testDir}||${table}`;
     return createHash("sha256").update(data).digest("hex");
   }
 
