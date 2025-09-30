@@ -5,20 +5,24 @@
 [![Node >= 20](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](#installation)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Production-ready SQL migration tool for Node.js with checksums, transaction control, and advanced PostgreSQL support.
+Production-ready SQL migration tool for Node.js with checksums, transaction control, and dual PostgreSQL/MySQL support.
 
 **Key Features:**
 - SHA-256 checksums for drift detection
 - Automatic transaction wrapping with hazard detection
 - Detects operations that can't run in transactions (CREATE INDEX CONCURRENTLY, etc.)
+<<<<<<< Updated upstream
 - Full PostgreSQL support (dollar quotes, E-strings, COPY)
 - MySQL driver with named locks, millisecond timestamps, and automatic non-transactional execution
+=======
+- Dual drivers: PostgreSQL (advisory locks) and MySQL (named locks)
+- Advanced PostgreSQL parsing (dollar quotes, E-strings, COPY blocks)
+>>>>>>> Stashed changes
 - TOML/JSON configuration with env var substitution
-- 300+ tests passing with comprehensive edge case coverage
+- 390+ tests across both drivers with comprehensive edge-case coverage
 - Performance optimized with migration file caching
-- Configurable database schema support
+- Configurable database schema/table names
 - Standardized exit codes for CI/CD integration
-- Advisory locking prevents concurrent migrations
 - JSON output for automation and monitoring
 - File:line:column error reporting for instant debugging
 - Color-aware CLI output respecting `NO_COLOR`/`NOMAD_NO_COLOR`
@@ -46,37 +50,47 @@ To unlink later, run `npm unlink --global nomadjs` and `npm unlink nomadjs` in a
 
 ## Database Prerequisites
 
-## Database Drivers
+NomadJS ships with native drivers for both PostgreSQL and MySQL. Use the driver that matches your connection string, or set it explicitly with `--driver`, `NOMAD_DRIVER`, or in your config file.
 
-Nomad defaults to PostgreSQL. Switch drivers using any of the following (all equivalent):
+- **PostgreSQL**: Uses advisory locks via `pg_try_advisory_lock`. Supports schemas (default `public`) and transactional DDL.
+- **MySQL (8.0+)**: Uses named locks via `GET_LOCK`. DDL executes outside transactions automatically (the driver reports `supportsTransactionalDDL = false`).
 
-- CLI: `--driver postgres` or `--driver mysql`
-- Environment: `NOMAD_DRIVER=postgres|mysql`
-- Config file fragment:
-  ```toml
-  [database]
-  driver = "mysql"
-  ```
-
-When targeting MySQL, Nomad uses named locks (`GET_LOCK`/`RELEASE_LOCK`), millisecond timestamp columns, and automatically skips transactions for migrations because MySQL auto-commits most DDL. Set `NOMAD_MYSQL_CONNECT_TIMEOUT_MS` (or fall back to `NOMAD_PG_CONNECT_TIMEOUT_MS`) to tune connection probes when the CLI checks database availability.
-
-### PostgreSQL
 - Create the target database yourself (Nomad will create only the version-tracking table).
 - For example, using the default `postgres` superuser:
   ```bash
   psql -U postgres -d postgres -c "CREATE DATABASE nomaddb;"
   export DATABASE_URL="postgres://postgres@localhost/nomaddb"
   ```
+- MySQL example:
+  ```bash
+  mysql -uroot -pnomad -e "CREATE DATABASE nomad_test;"
+  export DATABASE_URL="mysql://root:nomad@localhost:3306/nomad_test"
+  ```
 - Alternatively, pass `--url` to each command instead of exporting `DATABASE_URL`.
 
-### MySQL
-- Create the application database up front:
-  ```bash
-  mysql -uroot -p -e "CREATE DATABASE nomad_test;"
-  export MYSQL_URL="mysql://root:password@localhost:3306/nomad_test"
-  ```
-- Run commands with `--driver mysql` (or set `NOMAD_DRIVER=mysql`).
-- Because MySQL auto-commits most DDL, Nomad automatically executes MySQL migrations without wrapping them in transactions.
+### Driver Selection
+
+Nomad chooses the database driver in this order:
+1. `--driver` CLI flag (`postgres` or `mysql`)
+2. `NOMAD_DRIVER` environment variable
+3. `database.driver` field in `nomad.toml` / `nomad.json`
+4. URL scheme (`postgres://`, `mysql://`, etc.)
+5. Default: `postgres`
+
+Examples:
+
+```bash
+# Force MySQL for the current command
+nomad status --driver mysql --url "mysql://root:nomad@localhost:3306/nomad_test"
+
+# Set the default driver for this shell session
+export NOMAD_DRIVER=mysql
+nomad up --url "mysql://root:nomad@localhost:3306/nomad_test"
+
+# Override back to Postgres for a single run
+nomad plan --driver postgres --url "postgres://postgres@localhost/nomaddb"
+```
+
 
 ## Creating & Running Migrations
 
@@ -188,7 +202,7 @@ INSERT INTO logs VALUES (E'Error:\\nFile not found');
 | `nomad verify` | Verify migration checksums |
 | `nomad doctor` | Diagnose configuration and database readiness |
 
-All commands accept `--url`, `--dir`, `--table`, `--driver`, `--allow-drift`, and `--auto-notx` flags.
+All commands accept `--url`, `--dir`, `--table`, `--allow-drift`, `--auto-notx`, and the database `--driver` flag (`postgres` or `mysql`).
 
 📚 **Full Documentation:** See [CLI_DOCUMENTATION.md](./CLI_DOCUMENTATION.md) for detailed usage, directives, and examples.
 
@@ -202,16 +216,17 @@ Nomad prints color-coded status lines (success, warnings, notes) when running in
 
 Nomad reads settings in this order (highest priority first):
 
-1. CLI flags (`--url`, `--dir`, `--table`, `--config`).
-2. Environment variables (`DATABASE_URL`, `NOMAD_MIGRATIONS_DIR`, `NOMAD_DB_TABLE`, `NOMAD_DATABASE_URL`, `NOMAD_DRIVER`).
+1. CLI flags (`--url`, `--dir`, `--table`, `--driver`, `--config`).
+2. Environment variables (`DATABASE_URL`, `NOMAD_DATABASE_URL`, `NOMAD_DRIVER`, `NOMAD_MIGRATIONS_DIR`, `NOMAD_DB_TABLE`).
 3. Config file (`nomad.toml` or `nomad.json`).
-4. Defaults (`dir` defaults to `migrations`).
+4. Defaults (`dir` defaults to `migrations`, driver defaults to `postgres`).
 
 Place a `nomad.toml` or `nomad.json` next to your project to avoid repeating options. Example TOML:
 
 ```toml
 [database]
 url = "postgres://postgres@localhost/nomaddb"
+# driver = "postgres"            # optional: "postgres" or "mysql"
 table = "nomad_db_version"
 
 [migrations]

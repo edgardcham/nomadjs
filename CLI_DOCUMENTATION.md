@@ -2,7 +2,7 @@
 
 ## Overview
 
-NomadJS is a production-ready SQL migration tool for Node.js with advanced features including checksums, transaction control, and adapters for PostgreSQL and MySQL.
+NomadJS is a production-ready SQL migration tool for Node.js with checksums, transaction control, and first-class PostgreSQL/MySQL support.
 
 ## Features
 
@@ -47,6 +47,38 @@ When the MySQL driver is active, migrations run outside explicit transactions (M
    - Set `NO_COLOR` or `NOMAD_NO_COLOR=true` to force monochrome output
    - Override in CI with `NOMAD_NO_COLOR=false` if ANSI colors are desired
 
+## Database Drivers
+
+NomadJS bundles two native drivers:
+
+- **PostgreSQL** – Uses advisory locks via `pg_try_advisory_lock`, supports schemas (default `public`), and wraps DDL in transactions when possible.
+- **MySQL 8+** – Uses named locks via `GET_LOCK`, automatically runs DDL outside transactions, and stores timestamps with millisecond precision.
+
+Driver selection priority: CLI `--driver` flag → `NOMAD_DRIVER` env var → config file `database.driver` → URL scheme (`postgres://`, `postgresql://`, `mysql://`, `mariadb://`) → default `postgres`.
+
+Each driver also honours a dedicated connect-timeout env var (`NOMAD_PG_CONNECT_TIMEOUT_MS`, `NOMAD_MYSQL_CONNECT_TIMEOUT_MS`).
+
+**Driver selection examples**:
+
+```bash
+# Use MySQL for a single command
+databases_url="mysql://root:nomad@localhost:3306/nomad_test"
+nomad status --driver mysql --url "$databases_url"
+
+# Set default driver for the session
+export NOMAD_DRIVER=mysql
+nomad up --url "$databases_url"
+
+# Fall back to Postgres explicitly
+nomad plan --driver postgres --url "postgres://postgres@localhost/nomaddb"
+```
+
+### Colorized Output
+   - Success/info/warning messages are color-coded when stdout is a TTY
+   - Colors automatically disable when piping output
+   - Set `NO_COLOR` or `NOMAD_NO_COLOR=true` to force monochrome output
+   - Override in CI with `NOMAD_NO_COLOR=false` if ANSI colors are desired
+
 ## CLI Commands
 ### Global Flags
 
@@ -63,6 +95,8 @@ These options can be supplied before any command:
 
 Environment counterparts: `NOMAD_DRIVER`, `DATABASE_URL`/`NOMAD_DATABASE_URL`, `MYSQL_URL`, `NOMAD_MIGRATIONS_DIR`, `NOMAD_DB_TABLE`, `NOMAD_ALLOW_DRIFT`, `NOMAD_AUTO_NOTX`, `NOMAD_EVENTS_JSON`, `NOMAD_VERBOSE`.
 
+
+Use `--driver postgres` or `--driver mysql` (or set `NOMAD_DRIVER`) to target the desired backend when your URL is ambiguous.
 
 ### `nomad init-config [format]`
 Create a configuration file template.
@@ -85,7 +119,7 @@ nomad init-config json --output database.json
 # Database connection URL
 # Supports environment variable substitution
 url = "postgresql://user:password@localhost:5432/dbname"
-# driver = "mysql"  # Optional: switch to the MySQL adapter
+# driver = "postgres"  # optional: "postgres" or "mysql"
 # Or use env vars:
 # url = "${DATABASE_URL}"
 # url = "postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
