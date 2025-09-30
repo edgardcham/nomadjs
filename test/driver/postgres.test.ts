@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createPostgresDriver } from "../../src/driver/postgres.js";
-import { ConnectionError, SqlError } from "../../src/core/errors.js";
+import { ConnectionError, SqlError, ParseConfigError } from "../../src/core/errors.js";
 
 const mockClient = {
   query: vi.fn(),
@@ -15,6 +15,12 @@ vi.mock("pg", () => {
   class MockPool {
     constructor(options: any) {
       poolConfig = options;
+      const connString = options?.connectionString;
+      if (typeof connString === 'string' && connString.includes(':99999')) {
+        const err: any = new RangeError('port should be >= 0 and < 65536');
+        err.code = 'ERR_SOCKET_BAD_PORT';
+        throw err;
+      }
     }
 
     connect(): Promise<any> {
@@ -187,4 +193,62 @@ describe("Postgres driver", () => {
     await driver.close();
     expect(poolEnded).toBe(true);
   });
+  it("wraps connection failures raised during connect", async () => {
+    const driver: any = createPostgresDriver({ url: "postgres://", table: "nomad_migrations", schema: "public" });
+    const networkError = Object.assign(new Error("getaddrinfo ENOTFOUND db.local"), { code: "ENOTFOUND" });
+    connectSpy.mockRejectedValueOnce(networkError);
+
+    await expect(driver.connect()).rejects.toBeInstanceOf(ConnectionError);
+  });
+
+  it("maps invalid port errors to connection errors", () => {
+    const driver: any = createPostgresDriver({ url: "postgres://", table: "nomad_migrations", schema: "public" });
+    const portError = new RangeError("port should be >= 0 and < 65536");
+
+    const mapped = driver.mapError(portError);
+    expect(mapped).toBeInstanceOf(ConnectionError);
+  });
+
+  it("maps getaddrinfo failures without explicit code to connection errors", () => {
+    const driver: any = createPostgresDriver({ url: "postgres://", table: "nomad_migrations", schema: "public" });
+    const mapped = driver.mapError(new Error("getaddrinfo ENOTFOUND example.com"));
+
+    expect(mapped).toBeInstanceOf(ConnectionError);
+  });
+
+  it("maps timeout codes to connection errors", () => {
+    const driver: any = createPostgresDriver({ url: "postgres://", table: "nomad_migrations", schema: "public" });
+    const mapped = driver.mapError({ code: "ETIMEDOUT", message: "connect ETIMEDOUT 192.0.2.1:5432" });
+
+    expect(mapped).toBeInstanceOf(ConnectionError);
+  });
+
+  it("maps EPERM network errors to connection errors", () => {
+    const driver: any = createPostgresDriver({ url: "postgres://", table: "nomad_migrations", schema: "public" });
+    const mapped = driver.mapError({ code: "EPERM", message: "connect EPERM 192.0.2.1:5432" });
+
+    expect(mapped).toBeInstanceOf(ConnectionError);
+  });
+
+  it("maps pg searchParams parser errors to connection errors", () => {
+    const driver: any = createPostgresDriver({ url: "postgres://", table: "nomad_migrations", schema: "public" });
+    const mapped = driver.mapError(new TypeError("Cannot read properties of undefined (reading 'searchParams')"));
+
+    expect(mapped).toBeInstanceOf(ConnectionError);
+  });
+
+  it("maps pool-constructor errors to connection errors", () => {
+    const createDriver = () =>
+      createPostgresDriver({ url: "postgresql://localhost:99999/db", table: "nomad_migrations", schema: "public" });
+
+    expect(createDriver).toThrow(ConnectionError);
+  });
+
+  it("maps invalid connection strings to parse config errors", () => {
+    const driver: any = createPostgresDriver({ url: "postgres://", table: "nomad_migrations", schema: "public" });
+    const mapped = driver.mapError(new TypeError("Invalid connection string"));
+
+    expect(mapped).toBeInstanceOf(ParseConfigError);
+  });
+
 });

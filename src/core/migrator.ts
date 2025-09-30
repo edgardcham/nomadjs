@@ -5,7 +5,7 @@ import { listMigrationFiles, filenameToVersion } from "./files.js";
 import { parseNomadSqlFile, type ParsedMigration } from "../parser/enhanced-parser.js";
 import { calculateChecksum, verifyChecksum } from "./checksum.js";
 import { detectHazards, validateHazards } from "./hazards.js";
-import { DriftError, MissingFileError, SqlError, ConnectionError, ChecksumMismatchError, LockTimeoutError } from "./errors.js";
+import { DriftError, MissingFileError, SqlError, ConnectionError, ChecksumMismatchError, LockTimeoutError, NomadError } from "./errors.js";
 import { Planner, type PlanOptions, type MigrationPlan } from "./planner.js";
 import { matchesFilter, type TagFilter } from "./tags.js";
 import type { Config } from "../config.js";
@@ -91,11 +91,19 @@ export class Migrator {
   }
 
   private async withConnection<T>(fn: (connection: DriverConnection) => Promise<T>): Promise<T> {
-    const connection = await this.driver.connect();
+    let connection: DriverConnection | undefined;
     try {
+      connection = await this.driver.connect();
       return await fn(connection);
+    } catch (error) {
+      if (error instanceof NomadError) {
+        throw error;
+      }
+      throw this.driver.mapError(error);
     } finally {
-      await connection.dispose();
+      if (connection) {
+        await connection.dispose();
+      }
     }
   }
 

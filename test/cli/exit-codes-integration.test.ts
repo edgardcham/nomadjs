@@ -467,10 +467,20 @@ DROP TABLE missing_test_${timestamp};`;
     });
 
     it("should return 7 for invalid port", () => {
-      const result = runCommand(
-        `${nomadCmd} status --url "postgresql://localhost:99999/db" --dir ${testDir}`
-      );
-      expect(result.exitCode).toBe(7);
+      const previousTimeout = process.env.NOMAD_PG_CONNECT_TIMEOUT_MS;
+      process.env.NOMAD_PG_CONNECT_TIMEOUT_MS = "1000";
+      try {
+        const result = runCommand(
+          `${nomadCmd} status --url "postgresql://localhost:99999/db" --dir ${testDir}`
+        );
+        expect(result.exitCode).toBe(7);
+      } finally {
+        if (previousTimeout === undefined) {
+          delete process.env.NOMAD_PG_CONNECT_TIMEOUT_MS;
+        } else {
+          process.env.NOMAD_PG_CONNECT_TIMEOUT_MS = previousTimeout;
+        }
+      }
     });
 
     it("should return 7 for invalid credentials", () => {
@@ -488,12 +498,22 @@ DROP TABLE missing_test_${timestamp};`;
     });
 
     it("should return 7 for connection timeout", () => {
-      // Use an IP that will timeout (RFC 5737 documentation IP)
-      const result = runCommand(
-        `${nomadCmd} status --url "postgresql://192.0.2.1:5432/db" --dir ${testDir}`
-      );
-      expect(result.exitCode).toBe(7);
-    });
+      const previousTimeout = process.env.NOMAD_PG_CONNECT_TIMEOUT_MS;
+      process.env.NOMAD_PG_CONNECT_TIMEOUT_MS = "1000";
+      try {
+        // Use an IP that will timeout (RFC 5737 documentation IP)
+        const result = runCommand(
+          `${nomadCmd} status --url "postgresql://192.0.2.1:5432/db" --dir ${testDir}`
+        );
+        expect(result.exitCode).toBe(7);
+      } finally {
+        if (previousTimeout === undefined) {
+          delete process.env.NOMAD_PG_CONNECT_TIMEOUT_MS;
+        } else {
+          process.env.NOMAD_PG_CONNECT_TIMEOUT_MS = previousTimeout;
+        }
+      }
+    }, 10000);
   });
 
   describe("Edge Cases and Combined Scenarios", () => {

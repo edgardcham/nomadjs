@@ -154,9 +154,13 @@ class PostgresDriver implements Driver {
       if (options.connectTimeoutMs) {
         poolConfig.connectionTimeoutMillis = options.connectTimeoutMs;
       }
-      const pool = new Pool(poolConfig);
-      this.pool = pool as unknown as PoolLike;
-      this.ownsPool = true;
+      try {
+        const pool = new Pool(poolConfig);
+        this.pool = pool as unknown as PoolLike;
+        this.ownsPool = true;
+      } catch (error) {
+        throw this.mapError(error);
+      }
     }
   }
 
@@ -177,8 +181,12 @@ class PostgresDriver implements Driver {
   }
 
   async connect(): Promise<DriverConnection> {
-    const client = await this.pool.connect();
-    return new PostgresConnection(client, this.options.table, this.options.schema);
+    try {
+      const client = await this.pool.connect();
+      return new PostgresConnection(client, this.options.table, this.options.schema);
+    } catch (error) {
+      throw this.mapError(error);
+    }
   }
 
   async close(): Promise<void> {
@@ -193,33 +201,89 @@ class PostgresDriver implements Driver {
     }
 
     const err = error as any;
-    const message: string = err?.message || "Unknown database error";
-    const code: string | undefined = err?.code;
+    const message = typeof err?.message === "string" ? err.message : "Unknown database error";
+    const lowerMessage = message.toLowerCase();
 
-    const lowerMessage = typeof message === "string" ? message.toLowerCase() : "";
-    if (
-      err instanceof TypeError ||
-      lowerMessage.includes("invalid uri") ||
-      lowerMessage.includes("invalid connection string") ||
-      lowerMessage.includes("malformed")
-    ) {
-      return new ParseConfigError(`Invalid connection URL: ${message}`);
-    }
+    const codes = new Set<string>();
+    const addCode = (value: unknown) => {
+      if (typeof value === "string" && value.length > 0) {
+        codes.add(value);
+      }
+    };
 
-    if (code && ["ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "ENETUNREACH", "ECONNRESET"].includes(code)) {
+    addCode(err?.code);
+    addCode(err?.errno);
+    addCode(err?.original?.code);
+    addCode(err?.original?.errno);
+    addCode(err?.cause?.code);
+    addCode(err?.cause?.errno);
+
+    const connectionCodes = new Set([
+      "ECONNREFUSED",
+      "ENOTFOUND",
+      "EAI_AGAIN",
+      "ETIMEDOUT",
+      "ENETUNREACH",
+      "EHOSTUNREACH",
+      "ECONNRESET",
+      "ECONNABORTED",
+      "EPIPE",
+      "ERR_SOCKET_BAD_PORT",
+      "EPERM",
+      "EACCES",
+      "57P03",
+      "08001",
+      "08004",
+      "08006"
+    ]);
+
+    const hasConnectionCode = [...codes].some(code => connectionCodes.has(code));
+
+    const indicatesBadPort =
+      codes.has("ERR_SOCKET_BAD_PORT") ||
+      lowerMessage.includes("invalid port") ||
+      (lowerMessage.includes("port number") && (lowerMessage.includes("range") || lowerMessage.includes("out of range"))) ||
+      lowerMessage.includes("port should be") ||
+      lowerMessage.includes("port must be") ||
+      lowerMessage.includes("searchparams") ||
+      lowerMessage.includes("operation not permitted") ||
+      lowerMessage.includes("permission denied");
+
+    const connectionByMessage =
+      lowerMessage.includes("getaddrinfo") ||
+      lowerMessage.includes("connection refused") ||
+      lowerMessage.includes("could not connect to server") ||
+      (lowerMessage.includes("timeout") && (lowerMessage.includes("connect") || lowerMessage.includes("connection"))) ||
+      lowerMessage.includes("no such host") ||
+      lowerMessage.includes("failed to resolve") ||
+      lowerMessage.includes("server closed the connection") ||
+      lowerMessage.includes("connection terminated unexpectedly");
+
+    if (hasConnectionCode || indicatesBadPort || connectionByMessage) {
       return new ConnectionError(`Connection failed: ${message}`);
     }
 
-    if (code && ["28P01", "28000"].includes(code)) {
+    if (codes.has("28P01") || codes.has("28000")) {
       return new ConnectionError(`Authentication failed: ${message}`);
     }
 
-    if (code === "3D000" || message.includes("does not exist")) {
+    if (codes.has("3D000") || lowerMessage.includes("does not exist")) {
       return new ConnectionError(`Database error: ${message}`);
     }
 
-    if (typeof message === "string" && (message.includes("password") || message.includes("authentication"))) {
+    if (lowerMessage.includes("password") || lowerMessage.includes("authentication")) {
       return new ConnectionError(`Authentication failed: ${message}`);
+    }
+
+    const parseConfigIndicators =
+      err instanceof SyntaxError ||
+      lowerMessage.includes("invalid uri") ||
+      lowerMessage.includes("invalid url") ||
+      lowerMessage.includes("invalid connection string") ||
+      lowerMessage.includes("malformed");
+
+    if (parseConfigIndicators) {
+      return new ParseConfigError(`Invalid connection URL: ${message}`);
     }
 
     return new SqlError(message);
