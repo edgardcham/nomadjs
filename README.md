@@ -24,7 +24,7 @@ Production-ready SQL migration tool for Node.js with checksums, transaction cont
 
 ## Installation
 
-Requirements: Node.js 20 or newer.
+Requirements: Node.js 20+.
 
 After publish (recommended for most users):
 
