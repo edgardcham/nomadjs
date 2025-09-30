@@ -108,14 +108,12 @@ export class Migrator {
   }
 
   private computeLockKey(): string {
-    const parts = [
-      this.config.url || "",
-      this.config.schema || "public",
-      this.config.table || "nomad_migrations",
-      this.config.dir || ""
-    ];
-    const combined = parts.join("|");
-    return createHash("sha256").update(combined).digest("hex");
+    const url = this.config.url || "";
+    const dir = this.config.dir || "";
+    const table = this.config.table || "nomad_migrations";
+    const schema = this.config.schema || "public";
+    const data = `${url}|${dir}|${schema}|${table}`;
+    return createHash("sha256").update(data).digest("hex");
   }
 
   private async acquireLock(connection: DriverConnection): Promise<() => Promise<void>> {

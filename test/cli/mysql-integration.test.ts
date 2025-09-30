@@ -5,6 +5,7 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import mysql from "mysql2/promise";
@@ -36,15 +37,17 @@ describeIfDb("CLI: MySQL integration", () => {
 
   beforeAll(async () => {
     connection = await mysql.createConnection(mysqlUrl);
-    await connection.query("DROP TABLE IF EXISTS mysql_smoke_users");
+    await connection.query('DROP TABLE IF EXISTS mysql_smoke_users');
   });
 
   afterAll(async () => {
     try {
       for (const table of tablesUsed) {
+        const lockKey = computeLockKey(table);
+        await connection.query('SELECT RELEASE_LOCK(?)', [lockKey]);
         await connection.query(`DROP TABLE IF EXISTS ${table}`);
       }
-      await connection.query("DROP TABLE IF EXISTS mysql_smoke_users");
+      await connection.query('DROP TABLE IF EXISTS mysql_smoke_users');
     } finally {
       await connection.end();
     }
@@ -59,28 +62,35 @@ describeIfDb("CLI: MySQL integration", () => {
       rmSync(testDir, { recursive: true, force: true });
     }
     for (const table of tablesUsed) {
+      const lockKey = computeLockKey(table);
+      await connection.query('SELECT RELEASE_LOCK(?)', [lockKey]);
       await connection.query(`DROP TABLE IF EXISTS ${table}`);
     }
     tablesUsed.clear();
-    await connection.query("DROP TABLE IF EXISTS mysql_smoke_users");
+    await connection.query('DROP TABLE IF EXISTS mysql_smoke_users');
   });
 
+  function computeLockKey(table: string): string {
+    const data = `${mysqlUrl || ""}|${testDir}|${"public"}|${table}`;
+    return createHash("sha256").update(data).digest("hex");
+  }
+
   function runCLI(args: string, table: string, expectError = false): string {
-    const command = `${nomadCmd} --driver mysql --url "${mysqlUrl}" --dir "${testDir}" --table ${table} ${args}`;
-    try {
-      return execSync(command, {
-        encoding: "utf8",
-        env: { ...process.env, DATABASE_URL: mysqlUrl, NOMAD_DRIVER: "mysql" }
-      }).toString();
-    } catch (error: any) {
-      if (expectError) {
-        return (error.stdout || error.stderr || error.message)?.toString();
-      }
-      throw new Error(`CLI failed: ${error.message}
+  const command = `${nomadCmd} --driver mysql --url "${mysqlUrl}" --dir "${testDir}" --table ${table} ${args}`;
+  try {
+    return execSync(command, {
+      encoding: "utf8",
+      env: { ...process.env, DATABASE_URL: mysqlUrl, NOMAD_DRIVER: "mysql" }
+    }).toString();
+  } catch (error: any) {
+    if (expectError) {
+      return (error.stdout || error.stderr || error.message)?.toString();
+    }
+    throw new Error(`CLI failed: ${error.message}
 stdout: ${error.stdout}
 stderr: ${error.stderr}`);
-    }
   }
+}
 
   it("applies and rolls back a migration", async () => {
     const tableName = makeTableName();
