@@ -1,3 +1,4 @@
+
 /**
  * CLI integration smoke tests for MySQL driver.
  */
@@ -20,21 +21,29 @@ if (!shouldRunDbTests) {
 }
 
 const describeIfDb = shouldRunDbTests ? describe : describe.skip;
+const tablesUsed = new Set<string>();
+
+function makeTableName(): string {
+  const unique = `${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
+  const name = `nomad_mysql_${unique}`;
+  tablesUsed.add(name);
+  return name;
+}
 
 describeIfDb("CLI: MySQL integration", () => {
-  const testTable = `nomad_mysql_${Date.now()}`;
-  const testDir = join(process.cwd(), `test-migrations-mysql`);
+  const testDir = join(process.cwd(), "test-migrations-mysql");
   let connection: mysql.Connection;
 
   beforeAll(async () => {
     connection = await mysql.createConnection(mysqlUrl);
-    await connection.query(`DROP TABLE IF EXISTS ${testTable}`);
     await connection.query("DROP TABLE IF EXISTS mysql_smoke_users");
   });
 
   afterAll(async () => {
     try {
-      await connection.query(`DROP TABLE IF EXISTS ${testTable}`);
+      for (const table of tablesUsed) {
+        await connection.query(`DROP TABLE IF EXISTS ${table}`);
+      }
       await connection.query("DROP TABLE IF EXISTS mysql_smoke_users");
     } finally {
       await connection.end();
@@ -49,11 +58,15 @@ describeIfDb("CLI: MySQL integration", () => {
     if (existsSync(testDir)) {
       rmSync(testDir, { recursive: true, force: true });
     }
+    for (const table of tablesUsed) {
+      await connection.query(`DROP TABLE IF EXISTS ${table}`);
+    }
+    tablesUsed.clear();
     await connection.query("DROP TABLE IF EXISTS mysql_smoke_users");
   });
 
-  function runCLI(args: string, expectError = false): string {
-    const command = `${nomadCmd} --driver mysql --url "${mysqlUrl}" --dir "${testDir}" --table ${testTable} ${args}`;
+  function runCLI(args: string, table: string, expectError = false): string {
+    const command = `${nomadCmd} --driver mysql --url "${mysqlUrl}" --dir "${testDir}" --table ${table} ${args}`;
     try {
       return execSync(command, {
         encoding: "utf8",
@@ -63,24 +76,31 @@ describeIfDb("CLI: MySQL integration", () => {
       if (expectError) {
         return (error.stdout || error.stderr || error.message)?.toString();
       }
-      throw new Error(`CLI failed: ${error.message}\nstdout: ${error.stdout}\nstderr: ${error.stderr}`);
+      throw new Error(`CLI failed: ${error.message}
+stdout: ${error.stdout}
+stderr: ${error.stderr}`);
     }
   }
 
   it("applies and rolls back a migration", async () => {
+    const tableName = makeTableName();
     const migrationFile = join(testDir, "20240101120000_create_users.sql");
     writeFileSync(
       migrationFile,
-      `-- +nomad up\nCREATE TABLE mysql_smoke_users (id INT PRIMARY KEY);\n-- +nomad down\nDROP TABLE mysql_smoke_users;\n`
+      `-- +nomad up
+CREATE TABLE mysql_smoke_users (id INT PRIMARY KEY);
+-- +nomad down
+DROP TABLE mysql_smoke_users;
+`
     );
 
-    const upOutput = runCLI("up");
+    const upOutput = runCLI("up", tableName);
     expect(upOutput).toContain("↑ up 20240101120000 (create_users)");
 
     const [rowsAfterUp] = await connection.query("SHOW TABLES LIKE 'mysql_smoke_users'");
     expect(Array.isArray(rowsAfterUp) && rowsAfterUp.length).toBeTruthy();
 
-    const downOutput = runCLI("down");
+    const downOutput = runCLI("down", tableName);
     expect(downOutput).toContain("↓ down 20240101120000 (create_users)");
 
     const [rowsAfterDown] = await connection.query("SHOW TABLES LIKE 'mysql_smoke_users'");
@@ -88,7 +108,8 @@ describeIfDb("CLI: MySQL integration", () => {
   });
 
   it("reports status in JSON", () => {
-    const statusOutput = runCLI("status --json");
+    const tableName = makeTableName();
+    const statusOutput = runCLI("status --json", tableName);
     expect(() => JSON.parse(statusOutput)).not.toThrow();
   });
 });
